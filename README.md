@@ -1,11 +1,12 @@
 
+
 # MediaPlayer VST
 
 [English](README_EN.md)
 
 MediaPlayer VSTは、DAW／VSTホスト内で音声ファイルと動画ファイルを再生するWindows用VST3プラグインです。音声はプラグインのStereo Outputからホストへ送り、動画はサイズ変更可能な独立ウィンドウへ表示します。
 
-<img width="300" height="321" alt="MPV" src="https://github.com/user-attachments/assets/4159a335-f340-4ee7-be3f-369f886ebbaf" />
+<img width="300" height="321" alt="MPV" src="https://github.com/user-attachments/assets/2a6764cc-5bf8-4f23-a330-944e63df93d4" />
 
 ## 主な機能
 
