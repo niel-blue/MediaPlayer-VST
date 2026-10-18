@@ -4,7 +4,7 @@
 
 MediaPlayer VST is a Windows VST3 plug-in for playing audio and video files inside a DAW or VST host. Audio is sent to the host through the plug-in's Stereo Output. Video is shown in a separate resizable window.
 
-<img width="300" height="321" alt="MPV" src="https://github.com/user-attachments/assets/4159a335-f340-4ee7-be3f-369f886ebbaf" />
+<img width="300" height="321" alt="MPV" src="https://github.com/user-attachments/assets/2a6764cc-5bf8-4f23-a330-944e63df93d4" />
 
 ## Features
 
