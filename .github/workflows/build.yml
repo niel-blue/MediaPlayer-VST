@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore FFmpeg cache
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/ffmpeg
+          key: ffmpeg-win64-lgpl-shared-c48230eb86
+
+      - name: Set up FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/setup_ffmpeg.ps1
+
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package VST3 ZIP
+        shell: pwsh
+        run: ./scripts/package_release.ps1 -BuildDirectory build
+
+      - name: Upload release ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaPlayer-VST-win-x64
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 14

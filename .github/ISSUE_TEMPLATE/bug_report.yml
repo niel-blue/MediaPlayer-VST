@@ -1,0 +1,42 @@
+name: Bug report
+description: 不具合を報告する
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: DAW Media Player version
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: DAW／ホストとWindows
+      placeholder: 例：REAPER 7.x / Windows 11 24H2
+    validations:
+      required: true
+  - type: input
+    id: media
+    attributes:
+      label: メディア形式
+      placeholder: 例：MP4 / H.264 + AAC / 1920x1080 30fps
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順と実際の結果
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する結果
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: 診断ログ
+      description: 任意。ファイルパスなどの公開したくない情報を削除してから添付してください。
