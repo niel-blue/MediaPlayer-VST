@@ -780,6 +780,10 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
             const auto index = static_cast<int>(LOWORD(hit));
             if (HIWORD(hit) == 0 && index >= 0 &&
                 index < static_cast<int>(editor->playlistPaths_.size())) {
+                // This custom drag handler consumes WM_LBUTTONDOWN instead of
+                // letting the list box's default procedure run. Give the list
+                // keyboard focus explicitly so its Delete-key handler can run.
+                SetFocus(window);
                 editor->playlistPointerDown_ = true;
                 editor->playlistDragging_ = false;
                 editor->playlistDragSourceIndex_ = index;
@@ -2100,12 +2104,14 @@ bool NativeEditor::updatePlaylist(
             SendMessageW(list, LB_ADDSTRING, 0,
                          reinterpret_cast<LPARAM>(name.c_str()));
         }
-        if (currentPlaylistIndex_ >= 0)
-            SendMessageW(list, LB_SETCURSEL,
-                         static_cast<WPARAM>(currentPlaylistIndex_), 0);
-        else
-            SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
     }
+    // The current item can change at natural track end without the playlist
+    // entries changing. Keep the row highlight in sync on every status update.
+    const auto selectedIndex = static_cast<int>(SendMessageW(
+        list, LB_GETCURSEL, 0, 0));
+    if (selectedIndex != currentPlaylistIndex_)
+        SendMessageW(list, LB_SETCURSEL,
+                     static_cast<WPARAM>(currentPlaylistIndex_), 0);
     return true;
 }
 

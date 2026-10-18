@@ -172,6 +172,26 @@ int main(int argc, char** argv)
            "playlist does not use the standard white inset border");
     expect((GetWindowLongPtrW(list, GWL_STYLE) & LBS_OWNERDRAWFIXED) != 0,
            "playlist uses the custom music-player row renderer");
+    const std::vector<std::filesystem::path> playlistItems {
+        L"C:/MediaPlayerTests/first.mp3",
+        L"C:/MediaPlayerTests/second.mp3"};
+    editor.updatePlaylist(playlistItems, 0);
+    expect(SendMessageW(list, LB_GETCURSEL, 0, 0) == 0,
+           "playlist highlights its current item");
+    editor.updatePlaylist(playlistItems, 1);
+    expect(SendMessageW(list, LB_GETCURSEL, 0, 0) == 1,
+           "playlist highlight follows a track advance without rebuilding");
+    RECT firstItem {};
+    SendMessageW(list, LB_GETITEMRECT, 0,
+                 reinterpret_cast<LPARAM>(&firstItem));
+    const auto clickX = firstItem.left + 5;
+    const auto clickY = firstItem.top +
+                        (firstItem.bottom - firstItem.top) / 2;
+    SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON,
+                 MAKELPARAM(clickX, clickY));
+    expect(GetFocus() == list,
+           "clicking a playlist row gives the list keyboard focus");
+    SendMessageW(list, WM_LBUTTONUP, 0, MAKELPARAM(clickX, clickY));
     RECT bounds {};
     GetWindowRect(list, &bounds);
     MapWindowPoints(nullptr, child, reinterpret_cast<POINT*>(&bounds), 2);
