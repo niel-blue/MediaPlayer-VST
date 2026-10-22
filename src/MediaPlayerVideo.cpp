@@ -1,6 +1,7 @@
 #include "MediaPlayerVideo.h"
 #include "MediaPlayerDebugLog.h"
 #include "MediaPlayerVideoDecoder.h"
+#include "ui/MediaPlayerEditorStyle.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -25,20 +26,13 @@ constexpr UINT kScale50 = 2002;
 constexpr UINT kScale100 = 2003;
 constexpr std::int64_t kMicrosecondsPerSecond = 1'000'000;
 constexpr int kVideoSeekBarHeight = 6;
-constexpr COLORREF kVideoSeekBackground = RGB(12, 22, 35);
-constexpr COLORREF kVideoSeekTrack = RGB(28, 76, 108);
-constexpr COLORREF kVideoSeekAccent = RGB(0, 178, 235);
-constexpr COLORREF kVideoSeekHandle = RGB(231, 244, 251);
-constexpr COLORREF kPauseOverlayBackground = RGB(12, 22, 35);
-constexpr COLORREF kPauseOverlayBorder = RGB(6, 201, 255);
-constexpr COLORREF kPauseOverlayIcon = RGB(231, 244, 251);
 
 HWND asWindow(void* handle) noexcept
 {
     return static_cast<HWND>(handle);
 }
 
-void drawPauseOverlay(HDC device, int clientWidth, int videoHeight)
+void drawPauseOverlay(HDC device, int clientWidth, int videoHeight, const EditorStyle::Theme& colors_)
 {
     if (device == nullptr || clientWidth <= 0 || videoHeight <= 0)
         return;
@@ -52,8 +46,8 @@ void drawPauseOverlay(HDC device, int clientWidth, int videoHeight)
     const auto right = left + diameter;
     const auto bottom = top + diameter;
 
-    const auto background = CreateSolidBrush(kPauseOverlayBackground);
-    const auto border = CreatePen(PS_SOLID, 2, kPauseOverlayBorder);
+    const auto background = CreateSolidBrush(colors_.kBackground);
+    const auto border = CreatePen(PS_SOLID, 2, colors_.kAccentBright);
     const auto oldBackground = SelectObject(device, background);
     const auto oldBorder = SelectObject(device, border);
     Ellipse(device, left, top, right, bottom);
@@ -68,7 +62,7 @@ void drawPauseOverlay(HDC device, int clientWidth, int videoHeight)
     const auto firstBarLeft = clientWidth / 2 - barGap / 2 - barWidth;
     const auto secondBarLeft = clientWidth / 2 + barGap / 2;
     const auto barTop = (videoHeight - barHeight) / 2;
-    const auto barBrush = CreateSolidBrush(kPauseOverlayIcon);
+    const auto barBrush = CreateSolidBrush(colors_.kText);
     const auto oldBrush = SelectObject(device, barBrush);
     RoundRect(device,
               firstBarLeft,
@@ -443,6 +437,11 @@ void VideoWindow::registerClass()
     });
 }
 
+void VideoWindow::setLightTheme(bool light)
+{
+    colors_.setLight(light);
+    if (window_) InvalidateRect(asWindow(window_), nullptr, FALSE);
+}
 VideoWindow::~VideoWindow()
 {
     close();
@@ -762,10 +761,10 @@ void VideoWindow::paint(void* rawDevice)
 
     if (frame_ != nullptr && info_.hasVideo && engine_ != nullptr &&
         !engine_->isPlaying())
-        drawPauseOverlay(backBuffer, clientWidth, videoHeight);
+        drawPauseOverlay(backBuffer, clientWidth, videoHeight, colors_);
 
     RECT seekBar {0, videoHeight, clientWidth, clientHeight};
-    const auto seekBackground = CreateSolidBrush(kVideoSeekBackground);
+    const auto seekBackground = CreateSolidBrush(colors_.kBackground);
     FillRect(backBuffer, &seekBar, seekBackground);
     DeleteObject(seekBackground);
 
@@ -780,13 +779,13 @@ void VideoWindow::paint(void* rawDevice)
         clientWidth * normalized));
     if (progressWidth > 0) {
         RECT progress {0, videoHeight, progressWidth, clientHeight};
-        const auto progressBrush = CreateSolidBrush(kVideoSeekAccent);
+        const auto progressBrush = CreateSolidBrush(colors_.kAccent);
         FillRect(backBuffer, &progress, progressBrush);
         DeleteObject(progressBrush);
     }
     const auto handleX = std::clamp(progressWidth, 1, clientWidth - 1);
     RECT handle {handleX - 1, videoHeight, handleX + 2, clientHeight};
-    const auto handleBrush = CreateSolidBrush(kVideoSeekHandle);
+    const auto handleBrush = CreateSolidBrush(colors_.kText);
     FillRect(backBuffer, &handle, handleBrush);
     DeleteObject(handleBrush);
 
@@ -807,10 +806,10 @@ void VideoWindow::paint(void* rawDevice)
             indicatorTop + kIndicatorHeight,
         };
         const auto indicatorBackground =
-            CreateSolidBrush(kVideoSeekBackground);
+            CreateSolidBrush(colors_.kBackground);
         FillRect(backBuffer, &indicator, indicatorBackground);
         DeleteObject(indicatorBackground);
-        const auto indicatorBorder = CreateSolidBrush(kVideoSeekAccent);
+        const auto indicatorBorder = CreateSolidBrush(colors_.kAccent);
         FrameRect(backBuffer, &indicator, indicatorBorder);
         DeleteObject(indicatorBorder);
 
@@ -823,7 +822,7 @@ void VideoWindow::paint(void* rawDevice)
             trackRight,
             trackY + 3,
         };
-        const auto trackBrush = CreateSolidBrush(kVideoSeekTrack);
+        const auto trackBrush = CreateSolidBrush(colors_.kSeekTrack);
         FillRect(backBuffer, &track, trackBrush);
         DeleteObject(trackBrush);
 
@@ -832,14 +831,14 @@ void VideoWindow::paint(void* rawDevice)
             volumeIndicatorLevel_));
         if (fillRight > trackLeft) {
             RECT fill {trackLeft, track.top, fillRight, track.bottom};
-            const auto fillBrush = CreateSolidBrush(kVideoSeekAccent);
+            const auto fillBrush = CreateSolidBrush(colors_.kAccent);
             FillRect(backBuffer, &fill, fillBrush);
             DeleteObject(fillBrush);
         }
 
         const auto knobX = std::clamp(fillRight, trackLeft, trackRight);
         RECT knob {knobX - 2, trackY - 5, knobX + 3, trackY + 6};
-        const auto knobBrush = CreateSolidBrush(kVideoSeekHandle);
+        const auto knobBrush = CreateSolidBrush(colors_.kText);
         FillRect(backBuffer, &knob, knobBrush);
         DeleteObject(knobBrush);
     }

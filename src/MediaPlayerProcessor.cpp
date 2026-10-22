@@ -475,6 +475,29 @@ tresult PLUGIN_API Processor::notify(IMessage* message)
         return kResultOk;
     }
 
+    if (FIDStringsEqual(message->getMessageID(), kEditPlaylistSelectionMessage)) {
+        const void* data = nullptr;
+        uint32 size = 0;
+        int64 insertionIndex = -1;
+        auto* attributes = message->getAttributes();
+        if (attributes->getBinary(kPlaylistSelectedIndicesAttribute, data, size) != kResultOk ||
+            data == nullptr || size == 0 || size % sizeof(std::int32_t) != 0 ||
+            size / sizeof(std::int32_t) > PlaylistModel::kMaximumEntries ||
+            attributes->getInt(kPlaylistInsertionIndexAttribute, insertionIndex) != kResultOk ||
+            insertionIndex < -1 || insertionIndex > static_cast<int64>(PlaylistModel::kMaximumEntries))
+            return kInvalidArgument;
+        std::vector<std::int32_t> indices(size / sizeof(std::int32_t));
+        std::memcpy(indices.data(), data, size);
+        if (insertionIndex < 0) {
+            const auto result = playlist_.remove(indices);
+            if (result.removedCurrent)
+                audioEngine_.requestUnload();
+            return result.removed ? kResultOk : kInvalidArgument;
+        }
+        return playlist_.move(indices, static_cast<std::int32_t>(insertionIndex))
+            ? kResultOk : kInvalidArgument;
+    }
+
     if (FIDStringsEqual(message->getMessageID(), kRemovePlaylistMessage)) {
         int64 index = -1;
         if (message->getAttributes()->getInt(

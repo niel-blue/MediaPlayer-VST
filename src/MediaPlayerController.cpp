@@ -1,8 +1,10 @@
 #include "MediaPlayerController.h"
+#include "base/source/fstreamer.h"
 
 #include "MediaPlayerEditor.h"
 #include "MediaPlayerEditorLayout.h"
 #include "MediaPlayerMessages.h"
+#include "MediaPlayerPlaylist.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -14,6 +16,24 @@ namespace MediaPlayer {
 using namespace Steinberg;
 using namespace Steinberg::Vst;
 
+tresult PLUGIN_API Controller::getState(IBStream* state)
+{
+    if (!state) return kInvalidArgument;
+    IBStreamer stream(state, kLittleEndian);
+    return stream.writeInt32(0x54484D31) && stream.writeInt32(lightTheme_ ? 1 : 0)
+        ? kResultOk : kResultFalse;
+}
+tresult PLUGIN_API Controller::setState(IBStream* state)
+{
+    if (!state) return kInvalidArgument;
+    IBStreamer stream(state, kLittleEndian);
+    int32 magic = 0, light = 0;
+    if (!stream.readInt32(magic) || magic != 0x54484D31 ||
+        !stream.readInt32(light) || (light != 0 && light != 1)) return kResultFalse;
+    lightTheme_ = light != 0;
+    if (editor_) editor_->setLightTheme(lightTheme_, false);
+    return kResultOk;
+}
 tresult PLUGIN_API Controller::initialize(FUnknown* context)
 {
     lastStatusSequence_ = -1;
@@ -109,6 +129,28 @@ tresult Controller::sendRemovePlaylist(std::int32_t index)
     const auto result = attributeResult == kResultOk
         ? sendMessage(message)
         : attributeResult;
+    message->release();
+    return result;
+}
+
+tresult Controller::sendPlaylistSelectionEdit(
+    const std::vector<std::int32_t>& indices, std::int32_t insertionIndex)
+{
+    if (indices.empty() || indices.size() > PlaylistModel::kMaximumEntries ||
+        insertionIndex < -1)
+        return kInvalidArgument;
+    auto* message = allocateMessage();
+    if (message == nullptr)
+        return kResultFalse;
+    message->setMessageID(kEditPlaylistSelectionMessage);
+    auto* attributes = message->getAttributes();
+    const auto indicesResult = attributes->setBinary(
+        kPlaylistSelectedIndicesAttribute, indices.data(),
+        static_cast<uint32>(indices.size() * sizeof(std::int32_t)));
+    const auto insertionResult = attributes->setInt(
+        kPlaylistInsertionIndexAttribute, insertionIndex);
+    const auto result = indicesResult == kResultOk && insertionResult == kResultOk
+        ? sendMessage(message) : kResultFalse;
     message->release();
     return result;
 }
@@ -266,7 +308,7 @@ tresult PLUGIN_API Controller::notify(IMessage* message)
         int64 videoPlacementUserSized = 0;
         int64 videoPlacementUserPosition = 0;
         int64 playlistVisible = 0;
-        int64 playlistHeight = 60;
+        int64 playlistHeight = EditorLayout::kDefaultPlaylistHeight;
         int64 statusSequence = -1;
         double volume = 1.0;
         auto* attributes = message->getAttributes();
@@ -305,8 +347,8 @@ tresult PLUGIN_API Controller::notify(IMessage* message)
             return kResultOk;
         lastStatusSequence_ = statusSequence;
 
-        constexpr int64 kMaxPlaylistEntries = 4096;
-        if (playlistCount < 0 || playlistCount > kMaxPlaylistEntries)
+        if (playlistCount < 0 ||
+            playlistCount > static_cast<int64>(PlaylistModel::kMaximumEntries))
             return kInvalidArgument;
 
         std::vector<std::filesystem::path> playlist;

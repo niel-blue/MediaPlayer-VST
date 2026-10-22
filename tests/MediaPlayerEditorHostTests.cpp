@@ -1,6 +1,9 @@
 #include "MediaPlayerController.h"
+#include "public.sdk/source/vst/utility/memoryibstream.h"
 #include "MediaPlayerEditor.h"
 #include "MediaPlayerEditorLayout.h"
+#include "MediaPlayerProcessor.h"
+#include "public.sdk/source/vst/hosting/hostclasses.h"
 #define NOMINMAX
 #include <windows.h>
 #include <iostream>
@@ -39,7 +42,7 @@ public:
 
 // Display the production editor without an audio chain for visual inspection.
 // No alternate renderer: the controls below are the same NativeEditor as VST3.
-int previewEditor(bool snapshot)
+int previewEditor(bool snapshot, bool light = false)
 {
     SetProcessDPIAware();
     constexpr int width = MediaPlayer::EditorLayout::kEditorWidth;
@@ -82,6 +85,7 @@ int previewEditor(bool snapshot)
     editor.updatePlaylist(tracks, 0);
     editor.updateMediaPath(tracks[0]);
     editor.updatePlaybackStatus(84 * 48000, 272 * 48000, 48000, false, true, 0.72f);
+    editor.setLightTheme(light);
     ShowWindow(parent, SW_SHOWNOACTIVATE);
     if (snapshot) {
         RedrawWindow(parent, nullptr, nullptr,
@@ -104,7 +108,7 @@ int previewEditor(bool snapshot)
         header.bfType = 0x4d42;
         header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
         header.bfSize = header.bfOffBits + width * height * 4;
-        std::ofstream output("tmp/mediaplayer-vst-ui.bmp", std::ios::binary);
+        std::ofstream output(light ? "tmp/mediaplayer-vst-light.bmp" : "tmp/mediaplayer-vst-ui.bmp", std::ios::binary);
         output.write(reinterpret_cast<const char*>(&header), sizeof(header));
         output.write(reinterpret_cast<const char*>(&bitmapInfo.bmiHeader),
                      sizeof(BITMAPINFOHEADER));
@@ -130,8 +134,125 @@ int previewEditor(bool snapshot)
     return 0;
 }
 
+int testPlaylistMultiSelection()
+{
+    Steinberg::Vst::HostApplication host;
+    MediaPlayer::Controller controller;
+    MediaPlayer::Processor processor;
+    controller.initialize(&host);
+    processor.initialize(&host);
+    controller.connect(&processor);
+    processor.connect(&controller);
+    ViewRect initial(0, 0, MediaPlayer::EditorLayout::kEditorWidth, 400);
+    MediaPlayer::NativeEditor editor(&controller, &initial);
+    const auto parent = CreateWindowExW(0, L"STATIC", L"Playlist edit test", WS_POPUP,
+        0, 0, 400, 700, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    StrictFrame frame;
+    frame.host = parent;
+    editor.attached(parent, kPlatformTypeHWND);
+    editor.setFrame(&frame);
+    MediaPlayer::EditorLayoutState layout;
+    layout.playlistVisible = true;
+    layout.playlistHeight = 200;
+    controller.sendEditorLayout(layout);
+    const std::vector<std::filesystem::path> entries {
+        L"C:/MediaPlayerTests/first.mp3", L"C:/MediaPlayerTests/second.mp3",
+        L"C:/MediaPlayerTests/third.mp3", L"C:/MediaPlayerTests/fourth.mp3",
+        L"C:/MediaPlayerTests/fifth.mp3", L"C:/MediaPlayerTests/sixth.mp3"};
+    for (const auto& path : entries)
+        processor.requestOpenFile(path);
+    processor.selectPlaylist(entries.front(), false);
+    controller.requestPlaybackStatus();
+    const auto list = FindWindowExW(GetWindow(parent, GW_CHILD), nullptr, L"LISTBOX", nullptr);
+    int failures = 0;
+    const auto expect = [&](bool ok, const char* message) {
+        if (!ok) { std::cerr << message << '\n'; ++failures; }
+    };
+    const auto pointAt = [&](int index, bool bottom = false) {
+        RECT row {};
+        SendMessageW(list, LB_GETITEMRECT, index, reinterpret_cast<LPARAM>(&row));
+        return MAKELPARAM(8, bottom ? row.bottom - 2 : (row.top + row.bottom) / 2);
+    };
+    const auto click = [&](int index, WPARAM modifiers = 0) {
+        const auto point = pointAt(index);
+        SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON | modifiers, point);
+        SendMessageW(list, WM_LBUTTONUP, modifiers, point);
+    };
+    const auto selected = [&] {
+        const auto count = static_cast<int>(SendMessageW(list, LB_GETSELCOUNT, 0, 0));
+        std::vector<int> result(count > 0 ? count : 0);
+        if (!result.empty())
+            SendMessageW(list, LB_GETSELITEMS, result.size(),
+                         reinterpret_cast<LPARAM>(result.data()));
+        return result;
+    };
+    const auto rowContains = [&](int index, const wchar_t* name) {
+        wchar_t text[512] {};
+        SendMessageW(list, LB_GETTEXT, index, reinterpret_cast<LPARAM>(text));
+        return std::wstring(text).find(name) != std::wstring::npos;
+    };
+    click(1);
+    click(4, MK_SHIFT);
+    expect(selected() == std::vector<int>{1, 2, 3, 4},
+           "Shift-click selects a contiguous range");
+    controller.requestPlaybackStatus();
+    controller.requestPlaybackStatus();
+    expect(selected() == std::vector<int>{1, 2, 3, 4},
+           "status polling preserves an editing selection");
+    click(3, MK_SHIFT);
+    expect(selected() == std::vector<int>{1, 2, 3},
+           "repeated Shift-click keeps the original anchor");
+    click(4, MK_SHIFT);
+    SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON, pointAt(2));
+    SendMessageW(list, WM_MOUSEMOVE, MK_LBUTTON, pointAt(3));
+    SendMessageW(list, WM_LBUTTONUP, 0, pointAt(3));
+    controller.requestPlaybackStatus();
+    expect(selected() == std::vector<int>{1, 2, 3, 4} && rowContains(1, L"second"),
+           "dropping a selected group onto itself preserves its order and selection");
+    SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON, pointAt(2));
+    SendMessageW(list, WM_MOUSEMOVE, MK_LBUTTON, pointAt(5, true));
+    controller.requestPlaybackStatus();
+    SendMessageW(list, WM_LBUTTONUP, 0, pointAt(5, true));
+    controller.requestPlaybackStatus();
+    expect(rowContains(0, L"first") && rowContains(1, L"sixth") &&
+           rowContains(2, L"second") && rowContains(5, L"fifth") &&
+           selected() == std::vector<int>{2, 3, 4, 5},
+           "dragging selected rows down moves the group and keeps it selected");
+    SendMessageW(list, WM_LBUTTONDOWN, MK_LBUTTON, pointAt(3));
+    SendMessageW(list, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(8, 0));
+    SendMessageW(list, WM_LBUTTONUP, 0, MAKELPARAM(8, 0));
+    controller.requestPlaybackStatus();
+    expect(rowContains(0, L"second") && rowContains(3, L"fifth") &&
+           rowContains(4, L"first") && selected() == std::vector<int>{0, 1, 2, 3},
+           "dragging selected rows up preserves the group order");
+    SendMessageW(list, WM_KEYDOWN, VK_DELETE, 0);
+    controller.requestPlaybackStatus();
+    expect(SendMessageW(list, LB_GETCOUNT, 0, 0) == 2 &&
+           rowContains(0, L"first") && rowContains(1, L"sixth"),
+           "Delete removes every selected row through the real controller and processor");
+    click(1);
+    click(0, MK_SHIFT);
+    expect(selected() == std::vector<int>{0, 1}, "Shift-click supports a backward range");
+    SendMessageW(list, WM_KEYDOWN, VK_DELETE, 0);
+    controller.requestPlaybackStatus();
+    expect(SendMessageW(list, LB_GETCOUNT, 0, 0) == 0,
+           "Delete can remove the entire selected playlist");
+    editor.setFrame(nullptr);
+    editor.removed();
+    DestroyWindow(parent);
+    controller.disconnect(&processor);
+    processor.disconnect(&controller);
+    controller.terminate();
+    processor.terminate();
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char** argv)
 {
+    if (argc > 1 && std::string_view(argv[1]) == "--snapshot-light")
+        return previewEditor(true, true);
+    if (argc > 1 && std::string_view(argv[1]) == "--preview-light")
+        return previewEditor(false, true);
     if (argc > 1 && std::string_view(argv[1]) == "--preview")
         return previewEditor(false);
     if (argc > 1 && std::string_view(argv[1]) == "--snapshot")
@@ -168,6 +289,41 @@ int main(int argc, char** argv)
     GetClientRect(child, &client);
     expect(client.bottom == 290, "native editor expands with host callback");
     const auto list = FindWindowExW(child, nullptr, L"LISTBOX", nullptr);
+    // Exercise the actual theme button, per-instance colors, and host state.
+    const auto panel = FindWindowExW(child, nullptr, MediaPlayer::NativeEditor::kPlayerPanelClassName, nullptr);
+    const auto theme = FindWindowExW(panel, nullptr, L"BUTTON", L"Dark");
+    expect(theme != nullptr, "theme button is visible in the player header");
+    RECT themeRect {};
+    GetWindowRect(theme, &themeRect);
+    expect(themeRect.right - themeRect.left == 40 && themeRect.bottom - themeRect.top == 16,
+           "theme button uses compact 40x16 bounds");
+    SendMessageW(theme, BM_CLICK, 0, 0);
+    expect(editor.isLightTheme() && controller.isLightTheme(), "button selects Light");
+    const auto dc = GetDC(child);
+    const auto brush = reinterpret_cast<HBRUSH>(SendMessageW(child, WM_CTLCOLORLISTBOX,
+        reinterpret_cast<WPARAM>(dc), reinterpret_cast<LPARAM>(list)));
+    LOGBRUSH description {};
+    GetObjectW(brush, sizeof(description), &description);
+    expect(description.lbColor == RGB(255,255,255) && GetTextColor(dc) == RGB(23,50,71),
+        "Light updates native list background and text together");
+    ReleaseDC(child, dc);
+    ResizableMemoryIBStream state;
+    expect(controller.getState(&state) == kResultOk, "theme saves to host controller state");
+    state.rewind();
+    MediaPlayer::Controller restored;
+    expect(restored.setState(&state) == kResultOk && restored.isLightTheme(),
+        "Light restores from host state");
+    {
+        ViewRect otherSize(0,0,300,160);
+        MediaPlayer::Controller separate;
+        MediaPlayer::NativeEditor separateEditor(&separate, &otherSize);
+        expect(!separateEditor.isLightTheme(), "other plugin instance stays Dark");
+        MediaPlayer::NativeEditor restoredEditor(&restored, &otherSize);
+        expect(restoredEditor.isLightTheme(), "new view uses restored theme");
+    }
+    SendMessageW(theme, BM_CLICK, 0, 0);
+    expect(!editor.isLightTheme(), "button switches back to Dark");
+    expect(SendMessageW(list, LB_GETCOUNT, 0, 0) == 0, "theme switching preserves the empty playlist");
     expect((GetWindowLongPtrW(list, GWL_EXSTYLE) & WS_EX_CLIENTEDGE) == 0,
            "playlist does not use the standard white inset border");
     expect((GetWindowLongPtrW(list, GWL_STYLE) & LBS_OWNERDRAWFIXED) != 0,
@@ -176,11 +332,20 @@ int main(int argc, char** argv)
         L"C:/MediaPlayerTests/first.mp3",
         L"C:/MediaPlayerTests/second.mp3"};
     editor.updatePlaylist(playlistItems, 0);
-    expect(SendMessageW(list, LB_GETCURSEL, 0, 0) == 0,
+    expect(SendMessageW(list, LB_GETSEL, 0, 0) > 0,
            "playlist highlights its current item");
     editor.updatePlaylist(playlistItems, 1);
-    expect(SendMessageW(list, LB_GETCURSEL, 0, 0) == 1,
+    expect(SendMessageW(list, LB_GETSEL, 1, 0) > 0 &&
+           SendMessageW(list, LB_GETSELCOUNT, 0, 0) == 1,
            "playlist highlight follows a track advance without rebuilding");
+    SendMessageW(list, LB_SETSEL, TRUE, 0);
+    editor.updatePlaylist(playlistItems, 1);
+    expect(SendMessageW(list, LB_GETSELCOUNT, 0, 0) == 2,
+           "unchanged playback status does not collapse a multiple selection");
+    editor.updatePlaylist(playlistItems, 0);
+    expect(SendMessageW(list, LB_GETSELCOUNT, 0, 0) == 1 &&
+           SendMessageW(list, LB_GETSEL, 0, 0) > 0,
+           "a real track change still moves the selection to the current song");
     RECT firstItem {};
     SendMessageW(list, LB_GETITEMRECT, 0,
                  reinterpret_cast<LPARAM>(&firstItem));
@@ -241,5 +406,6 @@ int main(int argc, char** argv)
     editor.setFrame(nullptr);
     editor.removed();
     DestroyWindow(parent);
-    return failures ? 1 : 0;
+    const auto multiSelectionFailed = testPlaylistMultiSelection();
+    return failures || multiSelectionFailed ? 1 : 0;
 }

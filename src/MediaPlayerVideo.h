@@ -1,4 +1,5 @@
 #pragma once
+#include "ui/MediaPlayerEditorStyle.h"
 
 #include "MediaPlayerMessages.h"
 
@@ -132,6 +133,7 @@ public:
         std::function<void(const VideoWindowPlacement&)> handler);
     void applyRememberedPlacement(const VideoWindowPlacement& placement);
     void showVolumeIndicator(float normalizedVolume);
+    void setLightTheme(bool light);
 
 private:
     static long long __stdcall windowProc(void* window,
@@ -191,6 +193,7 @@ private:
     std::function<void(float)> userSeekHandler_;
     std::function<void(int)> userWheelHandler_;
     std::function<void(const VideoWindowPlacement&)> userPlacementHandler_;
+    EditorStyle::Theme colors_;
     bool volumeIndicatorVisible_ {false};
     float volumeIndicatorLevel_ {1.0f};
     std::chrono::steady_clock::time_point volumeIndicatorUntil_ {};

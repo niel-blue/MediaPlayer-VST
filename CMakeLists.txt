@@ -96,6 +96,10 @@ set(MEDIA_PLAYER_SOURCES
     src/MediaPlayerEditor.h
     src/MediaPlayerEditorLayout.cpp
     src/MediaPlayerEditorLayout.h
+    src/ui/MediaPlayerEditorStyle.h
+    src/ui/vst_base_palette.h
+    src/ui/vst_base_controls.h
+    src/ui/vst_base_knob_win32.h
     src/MediaPlayerFileTypes.cpp
     src/MediaPlayerFileTypes.h
     src/MediaPlayerMessages.h
@@ -302,7 +306,7 @@ if(WIN32)
     add_executable(MediaPlayerEditorHostTests
         tests/MediaPlayerEditorHostTests.cpp ${MEDIA_PLAYER_EDITOR_TEST_SOURCES})
     target_include_directories(MediaPlayerEditorHostTests PRIVATE src "${FFMPEG_ROOT}/include")
-    target_link_libraries(MediaPlayerEditorHostTests PRIVATE sdk ${FFMPEG_LINK_LIBRARIES}
+    target_link_libraries(MediaPlayerEditorHostTests PRIVATE sdk sdk_hosting ${FFMPEG_LINK_LIBRARIES}
         user32 comdlg32 comctl32 shell32 uxtheme ole32 gdi32 gdiplus)
     add_custom_command(TARGET MediaPlayerEditorHostTests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${FFMPEG_RUNTIME_DLLS}

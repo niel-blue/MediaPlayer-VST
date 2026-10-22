@@ -1,5 +1,7 @@
 #pragma once
 
+#include "MediaPlayerEditorLayout.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -28,6 +30,9 @@ inline constexpr char kSelectPlaylistMessage[] = "MediaPlayer.SelectPlaylist";
 inline constexpr char kClearPlaylistMessage[] = "MediaPlayer.ClearPlaylist";
 inline constexpr char kRemovePlaylistMessage[] = "MediaPlayer.RemovePlaylist";
 inline constexpr char kMovePlaylistMessage[] = "MediaPlayer.MovePlaylist";
+inline constexpr char kEditPlaylistSelectionMessage[] = "MediaPlayer.EditPlaylistSelection";
+inline constexpr char kPlaylistSelectedIndicesAttribute[] = "PlaylistSelectedIndices";
+inline constexpr char kPlaylistInsertionIndexAttribute[] = "PlaylistInsertionIndex";
 inline constexpr char kSetVideoPlacementMessage[] = "MediaPlayer.SetVideoPlacement";
 inline constexpr char kSetEditorLayoutMessage[] = "MediaPlayer.SetEditorLayout";
 inline constexpr char kPlaylistCountAttribute[] = "PlaylistCount";
@@ -60,7 +65,7 @@ struct VideoWindowPlacement final {
 
 struct EditorLayoutState final {
     bool playlistVisible {false};
-    std::int32_t playlistHeight {60};
+    std::int32_t playlistHeight {EditorLayout::kDefaultPlaylistHeight};
 };
 
 inline std::string playlistItemAttribute(std::size_t index)

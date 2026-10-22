@@ -5,6 +5,7 @@
 #include "MediaPlayerFileTypes.h"
 #include "MediaPlayerMessages.h"
 #include "MediaPlayerVideo.h"
+#include "ui/MediaPlayerEditorStyle.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -16,6 +17,7 @@
 #include <shellapi.h>
 #include <uxtheme.h>
 #include <gdiplus.h>
+#include "ui/vst_base_knob_win32.h"
 
 #include <algorithm>
 #include <atomic>
@@ -33,25 +35,9 @@ namespace {
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT_PTR kPlaylistDragScrollTimer = 2;
 constexpr UINT kRemovePlaylistCommand = 3001;
-constexpr UINT kPlaylistDragScrollIntervalMs = 120;
-constexpr int kPlaylistDragScrollEdge = 16;
 using namespace EditorLayout;
-
-// Reference palette: D:/DL/MPV.png. See COLOR_PALETTE.md for the full mapping.
-constexpr COLORREF kBackground = RGB(12, 22, 35);
-constexpr COLORREF kPlaylistBackground = RGB(18, 33, 48);
-constexpr COLORREF kPanel = RGB(20, 56, 86);
-constexpr COLORREF kPanelBorder = RGB(39, 73, 97);
-constexpr COLORREF kPlaylistSeparator = RGB(37, 74, 99);
-constexpr COLORREF kSeekTrack = RGB(28, 76, 108);
-constexpr COLORREF kDialTrack = RGB(36, 68, 93);
-constexpr COLORREF kText = RGB(231, 244, 251);
-constexpr COLORREF kMutedText = RGB(119, 148, 168);
-constexpr COLORREF kAccent = RGB(0, 178, 235);
-constexpr COLORREF kAccentBright = RGB(6, 201, 255);
-constexpr COLORREF kProgressBackground = RGB(12, 22, 35);
-constexpr COLORREF kPlaylistScrollThumb = RGB(69, 111, 137);
-constexpr float kVolumePerDragPixel = 0.005f;
+using namespace EditorStyle::Colors;
+using namespace EditorStyle::Behavior;
 constexpr wchar_t kEditorProperty[] = L"DAWMediaPlayer.NativeEditor";
 
 HWND asWindow(void* handle) noexcept
@@ -59,22 +45,45 @@ HWND asWindow(void* handle) noexcept
     return static_cast<HWND>(handle);
 }
 
-HBRUSH backgroundBrush()
+RECT nativeRect(const ControlBounds& bounds, int left = 0, int top = 0)
 {
-    static HBRUSH brush = CreateSolidBrush(kBackground);
-    return brush;
+    return {left + bounds.x, top + bounds.y,
+            left + bounds.x + bounds.width, top + bounds.y + bounds.height};
 }
 
-HBRUSH panelBrush()
+HFONT createEditorFont(const EditorStyle::Font& font)
 {
-    static HBRUSH brush = CreateSolidBrush(kPanel);
-    return brush;
+    return CreateFontW(-font.pixels, 0, 0, 0, font.weight,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, font.family);
 }
 
-HBRUSH playlistBackgroundBrush()
+int seekPositionFor(std::uint64_t position, std::uint64_t duration) noexcept
 {
-    static HBRUSH brush = CreateSolidBrush(kPlaylistBackground);
-    return brush;
+    return duration == 0 ? 0 : static_cast<int>(std::min<std::uint64_t>(
+        kSeekSteps, position * kSeekSteps / duration));
+}
+
+HBRUSH backgroundBrush(bool light = false)
+{
+    static HBRUSH dark = CreateSolidBrush(EditorStyle::Colors::native(vst_base::kDark.background));
+    static HBRUSH bright = CreateSolidBrush(EditorStyle::Colors::native(vst_base::kLight.background));
+    return light ? bright : dark;
+}
+
+HBRUSH panelBrush(bool light = false)
+{
+    static HBRUSH dark = CreateSolidBrush(EditorStyle::Colors::native(vst_base::kDark.selection));
+    static HBRUSH bright = CreateSolidBrush(EditorStyle::Colors::native(vst_base::kLight.selection));
+    return light ? bright : dark;
+}
+
+HBRUSH playlistBackgroundBrush(bool light = false)
+{
+    static HBRUSH dark = CreateSolidBrush(EditorStyle::Colors::native(vst_base::kDark.surface));
+    static HBRUSH bright = CreateSolidBrush(EditorStyle::Colors::native(vst_base::kLight.surface));
+    return light ? bright : dark;
 }
 
 void setDefaultFont(HWND control)
@@ -85,19 +94,13 @@ void setDefaultFont(HWND control)
 
 HFONT titleFont()
 {
-    static const auto font = CreateFontW(
-        -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    static const auto font = createEditorFont(EditorStyle::Fonts::kTitle);
     return font;
 }
 
 HFONT statusFont()
 {
-    static const auto font = CreateFontW(
-        -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    static const auto font = createEditorFont(EditorStyle::Fonts::kStatus);
     return font;
 }
 
@@ -108,115 +111,59 @@ Gdiplus::Color vectorColor(COLORREF color)
     return Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color));
 }
 
-void drawVectorTransport(HDC device, const RECT& bounds, int kind,
-                         bool playing, bool pressed)
+void drawVectorTransport(HDC device, const RECT& bounds, EditorStyle::TransportIcon kind,
+                         bool playing, bool pressed, const EditorStyle::Theme& colors)
 {
+    using namespace EditorStyle::Transport;
+    using Icon = EditorStyle::TransportIcon;
     Gdiplus::Graphics graphics(device);
     graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     const float x = static_cast<float>(bounds.left + bounds.right) / 2;
     const float y = static_cast<float>(bounds.top + bounds.bottom) / 2;
-    Gdiplus::SolidBrush icon(vectorColor(kText));
-    if (kind == 0) {
-        const float diameter = static_cast<float>(bounds.right - bounds.left) - 3;
-        Gdiplus::SolidBrush face(vectorColor(pressed ? kPanel : kAccent));
+    Gdiplus::SolidBrush icon(vectorColor(kind == Icon::play && !pressed && colors.light ? EditorStyle::Colors::native(colors.palette().onActionText) : colors.kText));
+    if (kind == Icon::play) {
+        const float diameter = static_cast<float>(bounds.right - bounds.left) - kPlayFaceInset;
+        Gdiplus::SolidBrush face(vectorColor(pressed ? colors.kPanel : colors.kAccent));
         graphics.FillEllipse(&face, x - diameter / 2, y - diameter / 2,
                              diameter, diameter);
         if (playing) {
-            graphics.FillRectangle(&icon, x - 5.0f, y - 6.0f, 3.0f, 12.0f);
-            graphics.FillRectangle(&icon, x + 2.0f, y - 6.0f, 3.0f, 12.0f);
+            graphics.FillRectangle(&icon, x + kPauseLeft, y - kPauseHalfHeight,
+                                   kPauseWidth, kPauseHalfHeight * 2);
+            graphics.FillRectangle(&icon, x + kPauseRight, y - kPauseHalfHeight,
+                                   kPauseWidth, kPauseHalfHeight * 2);
         } else {
-            const Gdiplus::PointF points[] {{x - 3.5f, y - 6},
-                {x + 6, y}, {x - 3.5f, y + 6}};
+            const Gdiplus::PointF points[] {{x + kPlayLeft, y - kPlayHalfHeight},
+                {x + kPlayTip, y}, {x + kPlayLeft, y + kPlayHalfHeight}};
             graphics.FillPolygon(&icon, points, 3);
         }
     } else {
         if (pressed) {
-            Gdiplus::SolidBrush face(vectorColor(kPanel));
-            graphics.FillEllipse(&face, x - 12, y - 12, 24.0f, 24.0f);
+            Gdiplus::SolidBrush face(vectorColor(colors.kPanel));
+            graphics.FillEllipse(&face,
+                x - kPressedFaceDiameter / 2, y - kPressedFaceDiameter / 2,
+                kPressedFaceDiameter, kPressedFaceDiameter);
         }
-        if (kind == 1) {
-            graphics.FillRectangle(&icon, x - 4.5f, y - 4.5f, 9.0f, 9.0f);
+        if (kind == Icon::stop) {
+            graphics.FillRectangle(&icon, x - kStopSize / 2, y - kStopSize / 2,
+                                   kStopSize, kStopSize);
         } else {
-            const float direction = kind == 2 ? -1.0f : 1.0f;
-            const Gdiplus::PointF points[] {{x - direction * 4, y - 5},
-                {x + direction * 3, y}, {x - direction * 4, y + 5}};
+            const float direction = kind == Icon::previous ? -1.0f : 1.0f;
+            const Gdiplus::PointF points[] {{x - direction * kSkipBase, y - kSkipHalfHeight},
+                {x + direction * kSkipTip, y}, {x - direction * kSkipBase, y + kSkipHalfHeight}};
             graphics.FillPolygon(&icon, points, 3);
-            graphics.FillRectangle(&icon, kind == 2 ? x - 7 : x + 5,
-                                    y - 5, 2.0f, 10.0f);
+            graphics.FillRectangle(&icon,
+                x + (kind == Icon::previous ? kPreviousBar : kNextBar),
+                y - kSkipHalfHeight, kSkipBarWidth, kSkipHalfHeight * 2);
         }
     }
 }
 
-void drawVectorDial(HDC device, int centerX, int centerY, float value)
+void drawVectorDial(HDC device, int centerX, int centerY, float value, const EditorStyle::Theme& colors)
 {
     Gdiplus::Graphics graphics(device);
-    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    const float x = static_cast<float>(centerX);
-    const float y = static_cast<float>(centerY);
-    value = std::clamp(value, 0.0f, 1.0f);
-
-    Gdiplus::SolidBrush shadow(Gdiplus::Color(90, 0, 0, 0));
-    graphics.FillEllipse(&shadow, x - 17.0f, y - 16.2f, 34.0f, 34.0f);
-
-    const Gdiplus::RectF shellBounds(x - 18.0f, y - 18.0f, 36.0f, 36.0f);
-    Gdiplus::LinearGradientBrush shell(
-        shellBounds,
-        Gdiplus::Color(255, 82, 108, 128),
-        Gdiplus::Color(255, 12, 24, 37),
-        Gdiplus::LinearGradientModeVertical);
-    graphics.FillEllipse(&shell, x - 18.0f, y - 18.0f, 36.0f, 36.0f);
-    Gdiplus::Pen shellEdge(vectorColor(kPanelBorder), 0.8f);
-    graphics.DrawEllipse(&shellEdge, x - 17.5f, y - 17.5f, 35.0f, 35.0f);
-
-    Gdiplus::Pen track(vectorColor(kDialTrack), 2.8f);
-    Gdiplus::Pen active(vectorColor(kAccentBright), 2.8f);
-    active.SetStartCap(Gdiplus::LineCapRound);
-    active.SetEndCap(Gdiplus::LineCapRound);
-    graphics.DrawArc(&track, x - 16.4f, y - 16.4f, 32.8f, 32.8f,
-                     135.0f, 270.0f);
-    if (value > 0)
-        graphics.DrawArc(&active, x - 16.4f, y - 16.4f, 32.8f, 32.8f,
-                         135.0f, 270.0f * value);
-
-    const Gdiplus::RectF faceBounds(x - 13.2f, y - 13.2f, 26.4f, 26.4f);
-    Gdiplus::LinearGradientBrush face(
-        faceBounds,
-        Gdiplus::Color(255, 34, 61, 82),
-        Gdiplus::Color(255, 9, 18, 29),
-        Gdiplus::LinearGradientModeVertical);
-    graphics.FillEllipse(&face, faceBounds);
-    Gdiplus::Pen faceEdge(vectorColor(kPanelBorder), 0.9f);
-    graphics.DrawEllipse(&faceEdge, faceBounds);
-
-    Gdiplus::Pen faceHighlight(Gdiplus::Color(125, 194, 221, 236), 0.75f);
-    graphics.DrawArc(&faceHighlight, x - 12.1f, y - 12.1f, 24.2f, 24.2f,
-                     205.0f, 130.0f);
-
-    const auto angle = (135.0 + 270.0 * value) * 3.14159265358979323846 / 180.0;
-    Gdiplus::Pen pointerShadow(vectorColor(kAccent), 2.8f);
-    pointerShadow.SetStartCap(Gdiplus::LineCapRound);
-    pointerShadow.SetEndCap(Gdiplus::LineCapRound);
-    graphics.DrawLine(&pointerShadow,
-        x + 2.8f * static_cast<float>(std::cos(angle)),
-        y + 2.8f * static_cast<float>(std::sin(angle)),
-        x + 9.8f * static_cast<float>(std::cos(angle)),
-        y + 9.8f * static_cast<float>(std::sin(angle)));
-
-    Gdiplus::Pen pointer(vectorColor(kText), 1.5f);
-    pointer.SetStartCap(Gdiplus::LineCapRound);
-    pointer.SetEndCap(Gdiplus::LineCapRound);
-    graphics.DrawLine(&pointer,
-        x + 2.8f * static_cast<float>(std::cos(angle)),
-        y + 2.8f * static_cast<float>(std::sin(angle)),
-        x + 9.8f * static_cast<float>(std::cos(angle)),
-        y + 9.8f * static_cast<float>(std::sin(angle)));
-
-    Gdiplus::SolidBrush pivot(vectorColor(kAccentBright));
-    Gdiplus::SolidBrush pivotCore(vectorColor(kText));
-    graphics.FillEllipse(&pivot, x - 2.1f, y - 2.1f, 4.2f, 4.2f);
-    graphics.FillEllipse(&pivotCore, x - 0.8f, y - 0.8f, 1.6f, 1.6f);
+    vst_base::DrawGainKnob(graphics, static_cast<float>(centerX),
+        static_cast<float>(centerY), value, colors.palette());
 }
-
 std::wstring formatTime(std::uint64_t frames, int sampleRate)
 {
     if (sampleRate <= 0)
@@ -457,6 +404,8 @@ NativeEditor::NativeEditor(Controller* controller, Steinberg::ViewRect* size)
       videoWindow_(std::make_unique<VideoWindow>())
 {
     controller->setEditor(this);
+    colors_.setLight(controller->isLightTheme());
+    videoWindow_->setLightTheme(colors_.light);
     videoWindow_->setUserCloseHandler([this] {
         if (auto* currentController =
                 static_cast<Controller*>(getController()))
@@ -475,7 +424,7 @@ NativeEditor::NativeEditor(Controller* controller, Steinberg::ViewRect* size)
     });
     videoWindow_->setUserSeekHandler([this](float normalized) {
         sendSeekFromPosition(static_cast<int>(std::lround(
-            std::clamp(normalized, 0.0f, 1.0f) * 1000.0f)));
+            std::clamp(normalized, 0.0f, 1.0f) * static_cast<float>(kSeekSteps))));
     });
     videoWindow_->setUserWheelHandler([this](int delta) {
         adjustVolumeFromWheel(delta);
@@ -635,7 +584,7 @@ void NativeEditor::attachedToParent()
             registerDropTarget(asWindow(playlistList_),
                                playlistDropTargetRegistered_);
         }
-        SetTimer(asWindow(window_), kStatusTimer, 100, nullptr);
+        SetTimer(asWindow(window_), kStatusTimer, kStatusIntervalMs, nullptr);
     }
 
     Steinberg::Vst::EditorView::attachedToParent();
@@ -694,6 +643,7 @@ void NativeEditor::removedFromParent()
         stopButton_ = nullptr;
         nextButton_ = nullptr;
         playerPanel_ = nullptr;
+        themeButton_ = nullptr;
         playlistList_ = nullptr;
         playlistClearButton_ = nullptr;
         playlistToggleButton_ = nullptr;
@@ -784,6 +734,28 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
                 // letting the list box's default procedure run. Give the list
                 // keyboard focus explicitly so its Delete-key handler can run.
                 SetFocus(window);
+                const auto shift = (wParam & MK_SHIFT) != 0;
+                const auto control = (wParam & MK_CONTROL) != 0;
+                if (shift) {
+                    auto anchor = static_cast<int>(SendMessageW(
+                        window, LB_GETANCHORINDEX, 0, 0));
+                    if (anchor < 0 || anchor >= static_cast<int>(editor->playlistPaths_.size()))
+                        anchor = index;
+                    if (!control)
+                        SendMessageW(window, LB_SETSEL, FALSE, -1);
+                    SendMessageW(window, LB_SELITEMRANGEEX,
+                                 std::min(anchor, index), std::max(anchor, index));
+                    SendMessageW(window, LB_SETCARETINDEX, index, FALSE);
+                } else if (control) {
+                    const auto selected = SendMessageW(window, LB_GETSEL, index, 0) > 0;
+                    SendMessageW(window, LB_SETSEL, !selected, index);
+                    SendMessageW(window, LB_SETCARETINDEX, index, FALSE);
+                    SendMessageW(window, LB_SETANCHORINDEX, index, 0);
+                } else if (SendMessageW(window, LB_GETSEL, index, 0) <= 0) {
+                    editor->setPlaylistSelection({index}, index);
+                }
+                editor->playlistPointerModifiers_ = static_cast<unsigned int>(
+                    wParam & (MK_SHIFT | MK_CONTROL));
                 editor->playlistPointerDown_ = true;
                 editor->playlistDragging_ = false;
                 editor->playlistDragSourceIndex_ = index;
@@ -808,8 +780,7 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
                 editor->playlistDragSourceIndex_ = -1;
                 editor->playlistDropInsertionIndex_ = -1;
                 KillTimer(window, kPlaylistDragScrollTimer);
-                SendMessageW(window, LB_SETCURSEL,
-                             static_cast<WPARAM>(index), 0);
+                editor->setPlaylistSelection({index}, index);
                 editor->selectPlaylistFromControl(true);
                 editor->ignorePlaylistMouseUp_ = true;
                 InvalidateRect(window, nullptr, FALSE);
@@ -843,15 +814,11 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
 
                 editor->playlistDragging_ = true;
                 SetTimer(window, kPlaylistDragScrollTimer,
-                         kPlaylistDragScrollIntervalMs, nullptr);
+                         kDragScrollIntervalMs, nullptr);
             }
 
             auto insertionIndex = editor->playlistInsertionIndexAt(
                 rawWindow, x, y);
-            const auto sourceIndex = editor->playlistDragSourceIndex_;
-            if (insertionIndex == sourceIndex ||
-                insertionIndex == sourceIndex + 1)
-                insertionIndex = -1;
             if (editor->playlistDropInsertionIndex_ != insertionIndex) {
                 editor->playlistDropInsertionIndex_ = insertionIndex;
                 InvalidateRect(window, nullptr, FALSE);
@@ -872,9 +839,9 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
                 const auto count = static_cast<int>(SendMessageW(
                     window, LB_GETCOUNT, 0, 0));
                 auto nextTop = topIndex;
-                if (cursor.y < client.top + kPlaylistDragScrollEdge)
+                if (cursor.y < client.top + kDragScrollEdge)
                     nextTop = std::max(0, topIndex - 1);
-                else if (cursor.y >= client.bottom - kPlaylistDragScrollEdge)
+                else if (cursor.y >= client.bottom - kDragScrollEdge)
                     nextTop = std::min(std::max(0, count - 1), topIndex + 1);
                 if (nextTop != topIndex)
                     SendMessageW(window, LB_SETTOPINDEX,
@@ -882,10 +849,6 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
 
                 auto insertionIndex = editor->playlistInsertionIndexAt(
                     rawWindow, cursor.x, cursor.y);
-                const auto sourceIndex = editor->playlistDragSourceIndex_;
-                if (insertionIndex == sourceIndex ||
-                    insertionIndex == sourceIndex + 1)
-                    insertionIndex = -1;
                 if (editor->playlistDropInsertionIndex_ != insertionIndex) {
                     editor->playlistDropInsertionIndex_ = insertionIndex;
                     InvalidateRect(window, nullptr, FALSE);
@@ -907,9 +870,6 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
             auto insertionIndex = wasDragging
                 ? editor->playlistInsertionIndexAt(rawWindow, x, y)
                 : -1;
-            if (insertionIndex == sourceIndex ||
-                insertionIndex == sourceIndex + 1)
-                insertionIndex = -1;
 
             editor->playlistPointerDown_ = false;
             editor->playlistDragging_ = false;
@@ -922,13 +882,11 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
 
             if (wasDragging) {
                 if (insertionIndex >= 0)
-                    editor->movePlaylistEntry(sourceIndex, insertionIndex);
-            } else if (sourceIndex >= 0 &&
-                       SendMessageW(window, LB_GETCURSEL, 0, 0) !=
-                           sourceIndex) {
-                SendMessageW(window, LB_SETCURSEL,
-                             static_cast<WPARAM>(sourceIndex), 0);
-                editor->selectPlaylistFromControl(false);
+                    editor->moveSelectedPlaylistEntries(insertionIndex);
+            } else if (sourceIndex >= 0 && editor->playlistPointerModifiers_ == 0) {
+                editor->setPlaylistSelection({sourceIndex}, sourceIndex);
+                if (sourceIndex != editor->currentPlaylistIndex_)
+                    editor->selectPlaylistFromControl(false);
             }
             return 0;
         }
@@ -944,19 +902,15 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
         }
 
         if (message == WM_KEYDOWN && wParam == VK_DELETE) {
-            const auto index = static_cast<int>(SendMessageW(
-                window, LB_GETCURSEL, 0, 0));
-            if (index >= 0) {
-                editor->removePlaylistEntry(index);
-                return 0;
-            }
+            editor->removeSelectedPlaylistEntries();
+            return 0;
         }
 
         if (message == WM_CONTEXTMENU) {
             int index = -1;
             if (lParam == -1) {
                 index = static_cast<int>(SendMessageW(
-                    window, LB_GETCURSEL, 0, 0));
+                    window, LB_GETCARETINDEX, 0, 0));
             } else {
                 POINT cursor {
                     static_cast<LONG>(static_cast<short>(LOWORD(lParam))),
@@ -974,8 +928,8 @@ long long __stdcall NativeEditor::playlistProc(void* rawWindow,
 
             if (index >= 0 &&
                 index < static_cast<int>(editor->playlistPaths_.size())) {
-                SendMessageW(window, LB_SETCURSEL,
-                             static_cast<WPARAM>(index), 0);
+                if (SendMessageW(window, LB_GETSEL, index, 0) <= 0)
+                    editor->setPlaylistSelection({index}, index);
                 editor->showPlaylistContextMenu(rawWindow, index, lParam);
                 return 0;
             }
@@ -1078,7 +1032,7 @@ long long __stdcall NativeEditor::playerPanelProc(void* rawWindow,
             RECT client {};
             GetClientRect(window, &client);
             FillRect(reinterpret_cast<HDC>(wParam), &client,
-                     backgroundBrush());
+                     backgroundBrush(editor->colors_.light));
             return 1;
         }
         default:
@@ -1103,7 +1057,7 @@ long long NativeEditor::handleProgressMessage(unsigned int message,
         const auto device = BeginPaint(window, &paint);
         RECT client {};
         GetClientRect(window, &client);
-        const auto background = CreateSolidBrush(kBackground);
+        const auto background = CreateSolidBrush(colors_.kBackground);
         FillRect(device, &client, background);
         DeleteObject(background);
 
@@ -1111,21 +1065,24 @@ long long NativeEditor::handleProgressMessage(unsigned int message,
             1,
             static_cast<int>(client.right - client.left));
         const auto progressWidth = std::clamp(
-            width * seekPosition_ / 1000, 0, width);
+            width * seekPosition_ / kSeekSteps, 0, width);
         const auto handleX = std::clamp(client.left + progressWidth,
-                                        client.left + 3,
-                                        client.right - 3);
+                                        client.left + EditorStyle::Seek::kEdgeInset,
+                                        client.right - EditorStyle::Seek::kEdgeInset);
         {
             Gdiplus::Graphics graphics(device);
             graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             const float y = static_cast<float>(client.bottom) / 2;
-            Gdiplus::Pen track(vectorColor(kSeekTrack), 2.0f);
-            Gdiplus::Pen progress(vectorColor(kAccent), 2.0f);
-            graphics.DrawLine(&track, 3.0f, y, static_cast<float>(width - 3), y);
-            graphics.DrawLine(&progress, 3.0f, y, static_cast<float>(handleX), y);
-            Gdiplus::SolidBrush handle(vectorColor(kAccentBright));
-            graphics.FillEllipse(&handle, static_cast<float>(handleX) - 2.5f,
-                                  y - 2.5f, 5.0f, 5.0f);
+            using namespace EditorStyle::Seek;
+            Gdiplus::Pen track(vectorColor(colors_.kSeekTrack), kLineWidth);
+            Gdiplus::Pen progress(vectorColor(colors_.kAccent), kLineWidth);
+            graphics.DrawLine(&track, static_cast<float>(kEdgeInset), y,
+                              static_cast<float>(width - kEdgeInset), y);
+            graphics.DrawLine(&progress, static_cast<float>(kEdgeInset), y,
+                              static_cast<float>(handleX), y);
+            Gdiplus::SolidBrush handle(vectorColor(colors_.kAccentBright));
+            graphics.FillEllipse(&handle, static_cast<float>(handleX) - kHandleRadius,
+                                  y - kHandleRadius, kHandleDiameter, kHandleDiameter);
         }
         EndPaint(window, &paint);
         return 0;
@@ -1139,7 +1096,7 @@ long long NativeEditor::handleProgressMessage(unsigned int message,
         const auto width = std::max(
             1,
             static_cast<int>(client.right - client.left));
-        const auto position = std::clamp((x * 1000) / width, 0, 1000);
+        const auto position = std::clamp((x * kSeekSteps) / width, 0, kSeekSteps);
 
         if (message == WM_LBUTTONDOWN ||
             (message == WM_MOUSEMOVE && (wParam & MK_LBUTTON) != 0)) {
@@ -1178,26 +1135,25 @@ long long NativeEditor::handleVolumeMessage(unsigned int message,
         GetClientRect(window, &client);
         const auto width = std::max(1, static_cast<int>(client.right - client.left));
         const auto height = std::max(1, static_cast<int>(client.bottom - client.top));
-        const auto background = CreateSolidBrush(kBackground);
+        const auto background = CreateSolidBrush(colors_.kBackground);
         FillRect(device, &client, background);
         DeleteObject(background);
 
         const auto centerX = width / 2;
-        const auto centerY = std::max(18, (height - 16) / 2);
+        const auto centerY = std::max(static_cast<int>(vst_base::kKnobStyle.gainDiameter / 2),
+                                     (height - Player::kVolumeLabelAreaHeight) / 2);
         const auto normalized = std::clamp(volume_, 0.0f, 1.0f);
-        drawVectorDial(device, centerX, centerY, normalized);
+        drawVectorDial(device, centerX, centerY, normalized, colors_);
 
         SetBkMode(device, TRANSPARENT);
-        SetTextColor(device, kMutedText);
-        const auto dialFont = CreateFontW(
-            -10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        SetTextColor(device, colors_.kMutedText);
+        const auto dialFont = createEditorFont(EditorStyle::Fonts::kVolume);
         const auto oldFont = SelectObject(device, dialFont);
         wchar_t value[16] {};
         swprintf_s(value, L"VOL %d%%", static_cast<int>(std::lround(
                                        normalized * 100.0f)));
-        RECT valueRect {0, height - 16, width, height - 2};
+        RECT valueRect {0, height - Player::kVolumeLabelAreaHeight,
+                        width, height - Player::kVolumeLabelBottomInset};
         DrawTextW(device, value, -1, &valueRect,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(device, oldFont);
@@ -1288,24 +1244,22 @@ long long NativeEditor::handleMessage(unsigned int message,
     case WM_PAINT: {
         PAINTSTRUCT paint {};
         const auto window = BeginPaint(asWindow(window_), &paint);
-        FillRect(window, &paint.rcPaint, backgroundBrush());
+        FillRect(window, &paint.rcPaint, backgroundBrush(colors_.light));
         if (playlistVisible_) {
             RECT client {};
             GetClientRect(asWindow(window_), &client);
             const auto layout = EditorLayout::calculate(client.right, playlistHeight_);
-            RECT border {layout.playlistList.x - 1, layout.playlistList.y - 1,
-                         layout.playlistList.x + layout.playlistList.width + 1,
-                         layout.playlistList.y + layout.playlistList.height + 1};
-            const auto brush = CreateSolidBrush(kPanelBorder);
+            const auto border = nativeRect(layout.playlistFrame);
+            const auto brush = CreateSolidBrush(colors_.kPanelBorder);
             // The player panel owns the top edge at the shared boundary.
-            RECT leftEdge {border.left, border.top, border.left + 1, border.bottom};
-            RECT rightEdge {border.right - 1, border.top, border.right, border.bottom};
-            RECT bottomEdge {border.left, border.bottom - 1, border.right, border.bottom};
+            RECT leftEdge {border.left, border.top, border.left + Playlist::kFrameWidth, border.bottom};
+            RECT rightEdge {border.right - Playlist::kFrameWidth, border.top, border.right, border.bottom};
+            RECT bottomEdge {border.left, border.bottom - Playlist::kFrameWidth, border.right, border.bottom};
             FillRect(window, &leftEdge, brush);
             FillRect(window, &rightEdge, brush);
             FillRect(window, &bottomEdge, brush);
-            RECT grip {client.right / 2 - 18, client.bottom - 6,
-                       client.right / 2 + 18, client.bottom - 4};
+            const auto grip = nativeRect(EditorLayout::calculateResizeGrip(
+                client.right, client.bottom));
             FillRect(window, &grip, brush);
             DeleteObject(brush);
         }
@@ -1343,11 +1297,7 @@ long long NativeEditor::handleMessage(unsigned int message,
                         static_cast<double>(durationFrames_)));
                     setPlaybackState(videoEngine_->isPlaying());
                     if (!draggingSeek_) {
-                        seekPosition_ = durationFrames_ == 0
-                            ? 0
-                            : static_cast<int>(std::min<std::uint64_t>(
-                                  1000,
-                                  positionFrames_ * 1000 / durationFrames_));
+                        seekPosition_ = seekPositionFor(positionFrames_, durationFrames_);
                         if (seekBar_ != nullptr)
                             InvalidateRect(asWindow(seekBar_), nullptr, FALSE);
                     }
@@ -1363,7 +1313,10 @@ long long NativeEditor::handleMessage(unsigned int message,
         const auto control = reinterpret_cast<HWND>(static_cast<LONG_PTR>(lParam));
         if (control == asWindow(playlistList_)) {
             if (notification == LBN_SELCHANGE) {
-                selectPlaylistFromControl(false);
+                if (SendMessageW(control, LB_GETSELCOUNT, 0, 0) == 1 &&
+                    (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
+                    (GetKeyState(VK_CONTROL) & 0x8000) == 0)
+                    selectPlaylistFromControl(false);
                 return 0;
             }
             if (notification == LBN_DBLCLK) {
@@ -1375,6 +1328,9 @@ long long NativeEditor::handleMessage(unsigned int message,
             break;
 
         switch (controlId) {
+        case kThemeButton:
+            setLightTheme(!colors_.light);
+            return 0;
         case kOpenButton:
             chooseFile();
             return 0;
@@ -1427,12 +1383,12 @@ long long NativeEditor::handleMessage(unsigned int message,
         const auto listBox = message == WM_CTLCOLORLISTBOX;
         SetTextColor(device,
                      listBox || control == asWindow(titleLabel_)
-                         ? kText
-                         : kMutedText);
-        SetBkColor(device, listBox ? kPlaylistBackground : kBackground);
+                         ? colors_.kText
+                         : colors_.kMutedText);
+        SetBkColor(device, listBox ? colors_.kPlaylistBackground : colors_.kBackground);
         SetBkMode(device, TRANSPARENT);
-        return reinterpret_cast<long long>(listBox ? playlistBackgroundBrush()
-                                                   : backgroundBrush());
+        return reinterpret_cast<long long>(listBox ? playlistBackgroundBrush(colors_.light)
+                                                   : backgroundBrush(colors_.light));
     }
     case WM_ERASEBKGND:
         return 1;
@@ -1512,6 +1468,9 @@ void NativeEditor::createControls()
         return control;
     };
 
+    themeButton_ = createButton(L"Dark", kThemeButton,
+        {kEditorWidth - kContentMargin - Player::kThemeWidth, Player::kThemeTop, Player::kThemeWidth, Player::kThemeHeight}, playerParent);
+    SetWindowTextW(asWindow(themeButton_), colors_.light ? L"Light" : L"Dark");
     openButton_ = createButton(L"Open", kOpenButton,
                                layout.openButton, playerParent);
     previousButton_ = createButton(L"", kPreviousButton,
@@ -1542,7 +1501,7 @@ void NativeEditor::createControls()
     playlistList_ = CreateWindowExW(
         0, L"LISTBOX", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL |
-            LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS,
+            LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_EXTENDEDSEL,
         layout.playlistList.x,
         layout.playlistList.y,
         layout.playlistList.width,
@@ -1612,6 +1571,7 @@ void NativeEditor::resizeControls()
     };
 
     move(playerPanel_, layout.playerPanel, parent);
+    move(themeButton_, {rootWidth - kContentMargin - Player::kThemeWidth, Player::kThemeTop, Player::kThemeWidth, Player::kThemeHeight}, playerParent);
     move(titleLabel_, layout.title, playerParent);
     move(statusLabel_, layout.status, playerParent);
     move(seekBar_, layout.seekBar, playerParent);
@@ -1642,6 +1602,22 @@ void NativeEditor::resizeControls()
         refreshMediaLabels();
 }
 
+void NativeEditor::setLightTheme(bool light, bool notifyHost)
+{
+    colors_.setLight(light);
+    if (auto* controller = static_cast<Controller*>(getController())) {
+        controller->setLightTheme(light);
+        if (notifyHost) controller->setDirty(true);
+    }
+    if (videoWindow_) videoWindow_->setLightTheme(light);
+    if (themeButton_) SetWindowTextW(asWindow(themeButton_), light ? L"Light" : L"Dark");
+    if (window_) {
+        RedrawWindow(asWindow(window_), nullptr, nullptr,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        if (playlistList_) RedrawWindow(asWindow(playlistList_), nullptr, nullptr,
+            RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
+    }
+}
 void NativeEditor::chooseFile()
 {
     wchar_t fileBuffer[32'768] {};
@@ -1900,8 +1876,8 @@ void NativeEditor::sendSeekFromControl()
 
 void NativeEditor::sendSeekFromPosition(int position)
 {
-    seekPosition_ = std::clamp(position, 0, 1000);
-    const auto normalized = static_cast<float>(seekPosition_) / 1000.0f;
+    seekPosition_ = std::clamp(position, 0, kSeekSteps);
+    const auto normalized = static_cast<float>(seekPosition_) / static_cast<float>(kSeekSteps);
     if (auto* controller = static_cast<Controller*>(getController()))
         controller->sendSeek(normalized);
     if (videoEngine_ != nullptr)
@@ -1923,7 +1899,7 @@ void NativeEditor::adjustVolumeFromWheel(int delta)
     if (delta == 0)
         return;
 
-    const auto normalizedDelta = 0.05f * static_cast<float>(delta) /
+    const auto normalizedDelta = kVolumePerWheelStep * static_cast<float>(delta) /
                                  static_cast<float>(WHEEL_DELTA);
     applyVolumeState(volume_ + normalizedDelta, true);
 }
@@ -1947,7 +1923,7 @@ void NativeEditor::updateTimeLabels()
         return;
 
     const auto previewPosition = draggingSeek_ && durationFrames_ > 0
-        ? durationFrames_ * static_cast<std::uint64_t>(seekPosition_) / 1000
+        ? durationFrames_ * static_cast<std::uint64_t>(seekPosition_) / kSeekSteps
         : positionFrames_;
     const auto current = formatTime(previewPosition, sampleRate_);
     const auto duration = durationFrames_ == 0
@@ -1980,10 +1956,7 @@ void NativeEditor::updatePlaybackStatus(std::uint64_t positionFrames,
     volume_ = std::clamp(volume, 0.0f, 1.0f);
 
     if (!draggingSeek_ && seekBar_ != nullptr) {
-        const auto position = durationFrames_ == 0
-            ? 0
-            : static_cast<int>(std::min<std::uint64_t>(
-                  1000, positionFrames_ * 1000 / durationFrames_));
+        const auto position = seekPositionFor(positionFrames_, durationFrames_);
         seekPosition_ = position;
         InvalidateRect(asWindow(seekBar_), nullptr, FALSE);
     }
@@ -2063,6 +2036,7 @@ bool NativeEditor::updatePlaylist(
         ? currentIndex
         : -1;
     const auto entriesChanged = entries != playlistPaths_;
+    const auto currentChanged = normalizedIndex != currentPlaylistIndex_;
     if (playlistSelectionPending_ && normalizedIndex != currentPlaylistIndex_)
         return false;
 
@@ -2105,25 +2079,70 @@ bool NativeEditor::updatePlaylist(
                          reinterpret_cast<LPARAM>(name.c_str()));
         }
     }
-    // The current item can change at natural track end without the playlist
-    // entries changing. Keep the row highlight in sync on every status update.
-    const auto selectedIndex = static_cast<int>(SendMessageW(
-        list, LB_GETCURSEL, 0, 0));
-    if (selectedIndex != currentPlaylistIndex_)
-        SendMessageW(list, LB_SETCURSEL,
-                     static_cast<WPARAM>(currentPlaylistIndex_), 0);
+    // Follow actual track changes, but leave an editing selection alone during
+    // ordinary status polling. A reordered group stays selected at its new rows.
+    if (listNeedsRebuild && !playlistSelectionAfterEdit_.empty()) {
+        std::vector<std::int32_t> selected;
+        for (std::size_t index = 0; index < playlistPaths_.size(); ++index) {
+            if (std::find(playlistSelectionAfterEdit_.begin(),
+                          playlistSelectionAfterEdit_.end(), playlistPaths_[index]) !=
+                playlistSelectionAfterEdit_.end())
+                selected.push_back(static_cast<std::int32_t>(index));
+        }
+        setPlaylistSelection(selected);
+        playlistSelectionAfterEdit_.clear();
+    } else if ((listNeedsRebuild || currentChanged) && !playlistPointerDown_) {
+        setPlaylistSelection(currentPlaylistIndex_ >= 0
+            ? std::vector<std::int32_t>{currentPlaylistIndex_}
+            : std::vector<std::int32_t>{});
+    }
     return true;
 }
 
-void NativeEditor::removePlaylistEntry(int index)
+std::vector<std::int32_t> NativeEditor::selectedPlaylistIndices() const
 {
-    if (playlistList_ == nullptr ||
-        index < 0 || index >= static_cast<int>(playlistPaths_.size()))
-        return;
+    if (playlistList_ == nullptr)
+        return {};
+    const auto list = asWindow(playlistList_);
+    const auto count = static_cast<int>(SendMessageW(list, LB_GETSELCOUNT, 0, 0));
+    if (count <= 0)
+        return {};
+    std::vector<std::int32_t> indices(static_cast<std::size_t>(count));
+    const auto copied = SendMessageW(list, LB_GETSELITEMS, count,
+                                    reinterpret_cast<LPARAM>(indices.data()));
+    if (copied == LB_ERR)
+        return {};
+    indices.resize(static_cast<std::size_t>(copied));
+    return indices;
+}
 
+void NativeEditor::setPlaylistSelection(
+    const std::vector<std::int32_t>& indices, int caret)
+{
+    if (playlistList_ == nullptr)
+        return;
+    const auto list = asWindow(playlistList_);
+    SendMessageW(list, LB_SETSEL, FALSE, -1);
+    for (const auto index : indices)
+        SendMessageW(list, LB_SETSEL, TRUE, index);
+    if (caret < 0 && !indices.empty())
+        caret = indices.front();
+    if (caret >= 0) {
+        SendMessageW(list, LB_SETCARETINDEX, caret, FALSE);
+        SendMessageW(list, LB_SETANCHORINDEX, caret, 0);
+    }
+}
+
+void NativeEditor::removeSelectedPlaylistEntries()
+{
+    const auto indices = selectedPlaylistIndices();
+    if (indices.empty())
+        return;
     if (auto* controller = static_cast<Controller*>(getController())) {
-        if (controller->sendRemovePlaylist(index) == Steinberg::kResultOk)
+        if (controller->sendPlaylistSelectionEdit(indices) == Steinberg::kResultOk) {
             playlistSelectionPending_ = false;
+            playlistSelectionAfterEdit_.clear();
+        }
     }
 }
 
@@ -2163,22 +2182,26 @@ int NativeEditor::playlistInsertionIndexAt(void* rawWindow,
     return y < (itemRect.top + itemRect.bottom) / 2 ? index : index + 1;
 }
 
-void NativeEditor::movePlaylistEntry(int sourceIndex, int insertionIndex)
+void NativeEditor::moveSelectedPlaylistEntries(int insertionIndex)
 {
-    if (sourceIndex < 0 ||
-        sourceIndex >= static_cast<int>(playlistPaths_.size()) ||
-        insertionIndex < 0 ||
+    const auto indices = selectedPlaylistIndices();
+    if (indices.empty() || insertionIndex < 0 ||
         insertionIndex > static_cast<int>(playlistPaths_.size()))
         return;
-
-    const auto targetIndex = insertionIndex > sourceIndex
-        ? insertionIndex - 1
-        : insertionIndex;
-    if (targetIndex == sourceIndex)
+    // Dropping a contiguous group onto itself does not produce a new snapshot.
+    // Do not leave a selection-restoration request waiting for an unrelated edit.
+    if (indices.back() - indices.front() + 1 == static_cast<int>(indices.size()) &&
+        insertionIndex >= indices.front() && insertionIndex <= indices.back() + 1)
         return;
-
-    if (auto* controller = static_cast<Controller*>(getController()))
-        controller->sendMovePlaylist(sourceIndex, targetIndex);
+    if (auto* controller = static_cast<Controller*>(getController())) {
+        std::vector<std::filesystem::path> selectedPaths;
+        for (const auto index : indices)
+            selectedPaths.push_back(playlistPaths_[static_cast<std::size_t>(index)]);
+        if (controller->sendPlaylistSelectionEdit(indices, insertionIndex) == Steinberg::kResultOk) {
+            playlistSelectionAfterEdit_ = std::move(selectedPaths);
+            playlistSelectionPending_ = false;
+        }
+    }
 }
 
 void NativeEditor::showPlaylistContextMenu(void* rawWindow,
@@ -2226,7 +2249,7 @@ void NativeEditor::showPlaylistContextMenu(void* rawWindow,
     DestroyMenu(menu);
 
     if (command == kRemovePlaylistCommand)
-        removePlaylistEntry(index);
+        removeSelectedPlaylistEntries();
 }
 
 void NativeEditor::selectPlaylistFromControl(bool play)
@@ -2234,7 +2257,7 @@ void NativeEditor::selectPlaylistFromControl(bool play)
     if (playlistList_ == nullptr)
         return;
     const auto index = static_cast<int>(SendMessageW(
-        asWindow(playlistList_), LB_GETCURSEL, 0, 0));
+        asWindow(playlistList_), LB_GETCARETINDEX, 0, 0));
     if (index < 0 || index >= static_cast<int>(playlistPaths_.size()))
         return;
 
@@ -2274,10 +2297,7 @@ void NativeEditor::selectAdjacentPlaylist(int direction)
         targetIndex >= static_cast<int>(playlistPaths_.size()))
         return;
 
-    SendMessageW(asWindow(playlistList_),
-                 LB_SETCURSEL,
-                 static_cast<WPARAM>(targetIndex),
-                 0);
+    setPlaylistSelection({targetIndex}, targetIndex);
     selectPlaylistFromControl(true);
 }
 
@@ -2338,36 +2358,34 @@ void NativeEditor::drawPlayerPanel(void* rawDevice) const
 
     RECT client {};
     GetClientRect(panel, &client);
-    FillRect(device, &client, backgroundBrush());
+    FillRect(device, &client, backgroundBrush(colors_.light));
 
-    RECT brandBand {client.left, client.top, client.right, 28};
-    const auto bandBrush = CreateSolidBrush(kBackground);
+    const auto layout = EditorLayout::calculate(client.right, playlistHeight_);
+    const auto brandBand = nativeRect(layout.brandBand);
+    const auto bandBrush = CreateSolidBrush(colors_.light ? EditorStyle::Colors::native(colors_.palette().header) : colors_.kBackground);
     FillRect(device, &brandBand, bandBrush);
     DeleteObject(bandBrush);
 
     SetBkMode(device, TRANSPARENT);
-    const auto brandFont = CreateFontW(
-        -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    const auto brandFont = createEditorFont(EditorStyle::Fonts::kBrand);
     const auto oldFont = SelectObject(device, brandFont);
-    SetTextColor(device, kText);
+    SetTextColor(device, colors_.kText);
     const wchar_t brandA[] = L"MediaPlayer ";
-    TextOutW(device, 12, 8, brandA, 12);
+    const auto brandLength = static_cast<int>(std::size(brandA) - 1);
+    TextOutW(device, kContentMargin, Player::kBrandTop, brandA, brandLength);
     SIZE brandSize {};
-    GetTextExtentPoint32W(device, brandA, 12, &brandSize);
-    SetTextColor(device, kAccentBright);
+    GetTextExtentPoint32W(device, brandA, brandLength, &brandSize);
+    SetTextColor(device, colors_.kAccentText);
     const wchar_t brandB[] = L"VST";
-    TextOutW(device, 12 + brandSize.cx, 8, brandB, 3);
+    TextOutW(device, kContentMargin + brandSize.cx, Player::kBrandTop,
+             brandB, static_cast<int>(std::size(brandB) - 1));
     SelectObject(device, oldFont);
     DeleteObject(brandFont);
 
     if (playlistVisible_) {
-        const auto layout = EditorLayout::calculate(client.right, playlistHeight_);
-        RECT topEdge {layout.playlistList.x - 1, kPlaylistPanelTop - 1,
-                      layout.playlistList.x + layout.playlistList.width + 1,
-                      kPlaylistPanelTop};
-        const auto borderBrush = CreateSolidBrush(kPanelBorder);
+        const auto topEdge = nativeRect({layout.playlistFrame.x,
+            layout.playlistFrame.y, layout.playlistFrame.width, Playlist::kFrameWidth});
+        const auto borderBrush = CreateSolidBrush(colors_.kPanelBorder);
         FillRect(device, &topEdge, borderBrush);
         DeleteObject(borderBrush);
     }
@@ -2377,14 +2395,10 @@ void NativeEditor::drawPlayerPanel(void* rawDevice) const
                                (playlistPaths_.size() == 1
                                     ? L" TRACK"
                                     : L" TRACKS");
-        const auto countFont = CreateFontW(
-            -10, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        const auto countFont = createEditorFont(EditorStyle::Fonts::kTrackCount);
         const auto oldCountFont = SelectObject(device, countFont);
-        SetTextColor(device, kMutedText);
-        RECT countBounds {112, kPlaylistHeaderTop + 2,
-                          client.right - 12, kPlaylistHeaderTop + 18};
+        SetTextColor(device, colors_.kMutedText);
+        auto countBounds = nativeRect(layout.playlistCount);
         DrawTextW(device, countText.c_str(), static_cast<int>(countText.size()),
                   &countBounds, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         SelectObject(device, oldCountFont);
@@ -2401,14 +2415,14 @@ void NativeEditor::drawPlaylistItem(const void* rawItem) const
 
     const auto selected = (item->itemState & ODS_SELECTED) != 0;
     const auto& path = playlistPaths_[item->itemID];
-    const auto background = CreateSolidBrush(selected ? kPanel : kPlaylistBackground);
+    const auto background = CreateSolidBrush(selected ? colors_.kPanel : colors_.kPlaylistBackground);
     FillRect(item->hDC, &item->rcItem, background);
     DeleteObject(background);
 
     if (selected) {
         RECT accent {item->rcItem.left, item->rcItem.top,
-                     item->rcItem.left + 3, item->rcItem.bottom};
-        const auto accentBrush = CreateSolidBrush(kAccent);
+                     item->rcItem.left + EditorStyle::Playlist::kSelectionMarkWidth, item->rcItem.bottom};
+        const auto accentBrush = CreateSolidBrush(colors_.kAccent);
         FillRect(item->hDC, &accent, accentBrush);
         DeleteObject(accentBrush);
     }
@@ -2420,15 +2434,15 @@ void NativeEditor::drawPlaylistItem(const void* rawItem) const
         const auto lineY = insertionIndex == static_cast<int>(item->itemID)
             ? item->rcItem.top
             : item->rcItem.bottom - 1;
-        const auto dropPen = CreatePen(PS_SOLID, 2, kAccentBright);
+        const auto dropPen = CreatePen(PS_SOLID, EditorStyle::Playlist::kDropLineWidth, colors_.kAccentBright);
         const auto oldDropPen = SelectObject(item->hDC, dropPen);
-        MoveToEx(item->hDC, item->rcItem.left + 3, lineY, nullptr);
-        LineTo(item->hDC, item->rcItem.right - 3, lineY);
+        MoveToEx(item->hDC, item->rcItem.left + EditorStyle::Playlist::kDropLineInset, lineY, nullptr);
+        LineTo(item->hDC, item->rcItem.right - EditorStyle::Playlist::kDropLineInset, lineY);
         SelectObject(item->hDC, oldDropPen);
         DeleteObject(dropPen);
     }
 
-    const auto separatorPen = CreatePen(PS_SOLID, 1, kPlaylistSeparator);
+    const auto separatorPen = CreatePen(PS_SOLID, EditorStyle::kBorderWidth, colors_.kPlaylistSeparator);
     const auto oldPen = SelectObject(item->hDC, separatorPen);
     MoveToEx(item->hDC, item->rcItem.left, item->rcItem.bottom - 1, nullptr);
     LineTo(item->hDC, item->rcItem.right, item->rcItem.bottom - 1);
@@ -2436,27 +2450,21 @@ void NativeEditor::drawPlaylistItem(const void* rawItem) const
     DeleteObject(separatorPen);
 
     SetBkMode(item->hDC, TRANSPARENT);
-    const auto rowFont = CreateFontW(
-        -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE,
-        FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    const auto rowFont = createEditorFont(EditorStyle::Fonts::kPlaylistRow);
     const auto oldFont = SelectObject(item->hDC, rowFont);
+    const auto row = EditorLayout::calculatePlaylistRow(
+        item->rcItem.right - item->rcItem.left, item->rcItem.bottom - item->rcItem.top);
 
     const auto indexText = std::to_wstring(item->itemID + 1);
-    SetTextColor(item->hDC, kMutedText);
-    RECT indexRect {item->rcItem.left + 10, item->rcItem.top,
-                    item->rcItem.left + 32, item->rcItem.bottom};
+    SetTextColor(item->hDC, selected && colors_.light ? colors_.kText : colors_.kMutedText);
+    auto indexRect = nativeRect(row.index, item->rcItem.left, item->rcItem.top);
     DrawTextW(item->hDC, indexText.c_str(), -1, &indexRect,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    const auto noteFont = CreateFontW(
-        -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Symbol");
+    const auto noteFont = createEditorFont(EditorStyle::Fonts::kPlaylistNote);
     const auto oldNoteFont = SelectObject(item->hDC, noteFont);
-    SetTextColor(item->hDC, kAccentBright);
-    RECT noteRect {item->rcItem.left + 33, item->rcItem.top,
-                   item->rcItem.left + 49, item->rcItem.bottom};
+    SetTextColor(item->hDC, colors_.kAccentText);
+    auto noteRect = nativeRect(row.note, item->rcItem.left, item->rcItem.top);
     DrawTextW(item->hDC, L"♪", -1, &noteRect,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(item->hDC, oldNoteFont);
@@ -2465,9 +2473,8 @@ void NativeEditor::drawPlaylistItem(const void* rawItem) const
     auto title = path.stem().wstring();
     if (title.empty())
         title = path.filename().wstring();
-    SetTextColor(item->hDC, kText);
-    RECT titleRect {item->rcItem.left + 54, item->rcItem.top,
-                    item->rcItem.right - 45, item->rcItem.bottom};
+    SetTextColor(item->hDC, colors_.kText);
+    auto titleRect = nativeRect(row.title, item->rcItem.left, item->rcItem.top);
     DrawTextW(item->hDC, title.c_str(), -1, &titleRect,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
                   DT_NOPREFIX);
@@ -2476,14 +2483,10 @@ void NativeEditor::drawPlaylistItem(const void* rawItem) const
     const wchar_t* badgeText = type == MediaFileType::audio
         ? L"AUDIO"
         : type == MediaFileType::video ? L"VIDEO" : L"MEDIA";
-    RECT badge {item->rcItem.right - 40, item->rcItem.top + 4,
-                item->rcItem.right - 5, item->rcItem.bottom - 4};
-    const auto badgeFont = CreateFontW(
-        -9, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    auto badge = nativeRect(row.badge, item->rcItem.left, item->rcItem.top);
+    const auto badgeFont = createEditorFont(EditorStyle::Fonts::kPlaylistBadge);
     const auto oldBadgeFont = SelectObject(item->hDC, badgeFont);
-    SetTextColor(item->hDC, kMutedText);
+    SetTextColor(item->hDC, selected && colors_.light ? colors_.kText : colors_.kMutedText);
     DrawTextW(item->hDC, badgeText, -1, &badge,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(item->hDC, oldBadgeFont);
@@ -2518,7 +2521,7 @@ void NativeEditor::drawPlaylistScrollbar() const
     if (device == nullptr)
         return;
 
-    const auto trackBrush = CreateSolidBrush(kProgressBackground);
+    const auto trackBrush = CreateSolidBrush(colors_.kBackground);
     FillRect(device, &scrollbar, trackBrush);
     DeleteObject(trackBrush);
 
@@ -2532,16 +2535,16 @@ void NativeEditor::drawPlaylistScrollbar() const
         1, static_cast<int>(client.bottom - client.top) / itemHeight);
     if (count > visibleItems) {
         RECT track {
-            scrollbar.left + 4,
-            scrollbar.top + 3,
-            scrollbar.right - 4,
-            scrollbar.bottom - 3,
+            scrollbar.left + EditorStyle::Scrollbar::kHorizontalInset,
+            scrollbar.top + EditorStyle::Scrollbar::kVerticalInset,
+            scrollbar.right - EditorStyle::Scrollbar::kHorizontalInset,
+            scrollbar.bottom - EditorStyle::Scrollbar::kVerticalInset,
         };
         const auto trackHeight = std::max(
             1, static_cast<int>(track.bottom - track.top));
         const auto thumbHeight = std::min(
             trackHeight,
-            std::max(16, trackHeight * visibleItems / count));
+            std::max(EditorStyle::Scrollbar::kMinimumThumbHeight, trackHeight * visibleItems / count));
         const auto maximumTopIndex = count - visibleItems;
         const auto topIndex = std::clamp(
             static_cast<int>(SendMessageW(list, LB_GETTOPINDEX, 0, 0)),
@@ -2554,12 +2557,13 @@ void NativeEditor::drawPlaylistScrollbar() const
                  : thumbTravel * topIndex / maximumTopIndex);
         RECT thumb {track.left, thumbTop, track.right,
                     thumbTop + thumbHeight};
-        const auto thumbBrush = CreateSolidBrush(kPlaylistScrollThumb);
-        const auto thumbPen = CreatePen(PS_SOLID, 1, kPlaylistScrollThumb);
+        const auto thumbBrush = CreateSolidBrush(colors_.kPlaylistScrollThumb);
+        const auto thumbPen = CreatePen(PS_SOLID, EditorStyle::kBorderWidth, colors_.kPlaylistScrollThumb);
         const auto oldBrush = SelectObject(device, thumbBrush);
         const auto oldPen = SelectObject(device, thumbPen);
         RoundRect(device, thumb.left, thumb.top, thumb.right, thumb.bottom,
-                  8, 8);
+                  EditorStyle::Scrollbar::kThumbCornerDiameter,
+                  EditorStyle::Scrollbar::kThumbCornerDiameter);
         SelectObject(device, oldPen);
         SelectObject(device, oldBrush);
         DeleteObject(thumbPen);
@@ -2578,23 +2582,39 @@ void NativeEditor::drawButton(const void* rawItem) const
     const auto selected = (item->itemState & ODS_SELECTED) != 0;
     const auto playButton = item->CtlID == kPlayButton;
     const auto openButton = item->CtlID == kOpenButton;
+    const auto themeButton = item->CtlID == kThemeButton;
     const auto iconButton = item->CtlID == kPreviousButton ||
                             playButton || item->CtlID == kStopButton ||
                             item->CtlID == kNextButton;
 
-    const auto baseBrush = CreateSolidBrush(kBackground);
+    const auto baseBrush = CreateSolidBrush(themeButton && colors_.light
+        ? EditorStyle::Colors::native(colors_.palette().header) : colors_.kBackground);
     FillRect(item->hDC, &item->rcItem, baseBrush);
     DeleteObject(baseBrush);
 
     if (iconButton) {
-        const auto kind = playButton ? 0 : item->CtlID == kStopButton ? 1
-            : item->CtlID == kPreviousButton ? 2 : 3;
-        drawVectorTransport(item->hDC, item->rcItem, kind, playing_, selected);
+        using Icon = EditorStyle::TransportIcon;
+        const auto kind = playButton ? Icon::play : item->CtlID == kStopButton ? Icon::stop
+            : item->CtlID == kPreviousButton ? Icon::previous : Icon::next;
+        drawVectorTransport(item->hDC, item->rcItem, kind, playing_, selected, colors_);
         return;
+    } else if (themeButton) {
+        // A separate, flat appearance for preferences; no operation-button border.
+        const auto& palette = colors_.palette();
+        const auto fill = selected ? colors_.kPanel : EditorStyle::Colors::native(
+            colors_.light ? palette.background : palette.surface);
+        const auto brush = CreateSolidBrush(fill);
+        const auto oldBrush = SelectObject(item->hDC, brush);
+        const auto oldPen = SelectObject(item->hDC, GetStockObject(NULL_PEN));
+        RoundRect(item->hDC, item->rcItem.left, item->rcItem.top,
+            item->rcItem.right, item->rcItem.bottom, 4, 4);
+        SelectObject(item->hDC, oldPen);
+        SelectObject(item->hDC, oldBrush);
+        DeleteObject(brush);
     } else if (!openButton) {
-        const auto fill = selected ? kPanel : kBackground;
+        const auto fill = selected ? colors_.kPanel : colors_.light ? colors_.kPlaylistBackground : colors_.kBackground;
         const auto fillBrush = CreateSolidBrush(fill);
-        const auto borderPen = CreatePen(PS_SOLID, 1, kAccentBright);
+        const auto borderPen = CreatePen(PS_SOLID, EditorStyle::kBorderWidth, colors_.light && !selected ? colors_.kPlaylistScrollThumb : colors_.kAccentBright);
         const auto oldBrush = SelectObject(item->hDC, fillBrush);
         const auto oldPen = SelectObject(item->hDC, borderPen);
         RoundRect(item->hDC,
@@ -2602,8 +2622,8 @@ void NativeEditor::drawButton(const void* rawItem) const
                   item->rcItem.top,
                   item->rcItem.right,
                   item->rcItem.bottom,
-                  6,
-                  6);
+                  EditorStyle::kButtonCornerDiameter,
+                  EditorStyle::kButtonCornerDiameter);
         SelectObject(item->hDC, oldPen);
         SelectObject(item->hDC, oldBrush);
         DeleteObject(borderPen);
@@ -2614,24 +2634,24 @@ void NativeEditor::drawButton(const void* rawItem) const
         {
             Gdiplus::Graphics graphics(item->hDC);
             graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            Gdiplus::Pen outline(vectorColor(selected ? kAccentBright : kText), 1.3f);
+            Gdiplus::Pen outline(vectorColor(selected ? colors_.kAccentBright : colors_.kText),
+                                 EditorStyle::Folder::kStrokeWidth);
             const float x = static_cast<float>(item->rcItem.left + item->rcItem.right) / 2;
-            const float y = static_cast<float>(item->rcItem.top) + 9;
-            const Gdiplus::PointF folder[] {{x - 8, y}, {x - 3, y},
-                {x - 1, y + 2}, {x + 8, y + 2}, {x + 8, y + 12},
-                {x - 8, y + 12}, {x - 8, y}};
+            const float y = static_cast<float>(item->rcItem.top) + EditorStyle::Folder::kTop;
+            Gdiplus::PointF folder[EditorStyle::Folder::kOutline.size()];
+            for (std::size_t index = 0; index < std::size(folder); ++index) {
+                const auto point = EditorStyle::Folder::kOutline[index];
+                folder[index] = {x + point.x, y + point.y};
+            }
             graphics.DrawLines(&outline, folder, static_cast<int>(std::size(folder)));
         }
 
         SetBkMode(item->hDC, TRANSPARENT);
-        SetTextColor(item->hDC, kMutedText);
-        const auto font = CreateFontW(
-            -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        SetTextColor(item->hDC, colors_.kMutedText);
+        const auto font = createEditorFont(EditorStyle::Fonts::kOpenCaption);
         const auto oldFont = SelectObject(item->hDC, font);
-        RECT label {item->rcItem.left, item->rcItem.bottom - 19,
-                    item->rcItem.right, item->rcItem.bottom - 2};
+        RECT label {item->rcItem.left, item->rcItem.bottom - Player::kOpenLabelAreaHeight,
+                    item->rcItem.right, item->rcItem.bottom - Player::kOpenLabelBottomInset};
         DrawTextW(item->hDC, L"Open", -1, &label,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(item->hDC, oldFont);
@@ -2640,13 +2660,8 @@ void NativeEditor::drawButton(const void* rawItem) const
         wchar_t text[32] {};
         GetWindowTextW(item->hwndItem, text, static_cast<int>(std::size(text)));
         SetBkMode(item->hDC, TRANSPARENT);
-        SetTextColor(item->hDC, kText);
-        const auto font = CreateFontW(
-            -10,
-            0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-            L"Segoe UI");
+        SetTextColor(item->hDC, themeButton && !selected ? colors_.kMutedText : colors_.kText);
+        const auto font = createEditorFont(EditorStyle::Fonts::kButton);
         const auto oldFont = SelectObject(item->hDC, font);
         RECT rect = item->rcItem;
         DrawTextW(item->hDC, text, -1, &rect,

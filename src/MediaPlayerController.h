@@ -18,6 +18,10 @@ public:
     }
 
     Steinberg::tresult PLUGIN_API initialize(Steinberg::FUnknown* context) SMTG_OVERRIDE;
+    Steinberg::tresult PLUGIN_API getState(Steinberg::IBStream* state) SMTG_OVERRIDE;
+    Steinberg::tresult PLUGIN_API setState(Steinberg::IBStream* state) SMTG_OVERRIDE;
+    bool isLightTheme() const noexcept { return lightTheme_; }
+    void setLightTheme(bool light) noexcept { lightTheme_ = light; }
     Steinberg::IPlugView* PLUGIN_API createView(const char* name) SMTG_OVERRIDE;
 
     Steinberg::tresult sendOpenFile(const std::filesystem::path& file);
@@ -25,6 +29,8 @@ public:
                                           bool play);
     Steinberg::tresult sendClearPlaylist();
     Steinberg::tresult sendRemovePlaylist(std::int32_t index);
+    Steinberg::tresult sendPlaylistSelectionEdit(
+        const std::vector<std::int32_t>& indices, std::int32_t insertionIndex = -1);
     Steinberg::tresult sendMovePlaylist(std::int32_t sourceIndex,
                                         std::int32_t targetIndex);
     Steinberg::tresult sendTransportMessage(const char* messageId);
@@ -52,6 +58,7 @@ public:
     REFCOUNT_METHODS(EditController)
 
 private:
+    bool lightTheme_ {false};
     NativeEditor* editor_ {nullptr};
     std::int64_t lastStatusSequence_ {-1};
     bool hasAppliedEditorState_ {false};

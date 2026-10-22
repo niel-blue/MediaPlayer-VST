@@ -60,20 +60,34 @@ std::optional<std::filesystem::path> PlaylistModel::advanceFrom(
 
 PlaylistModel::RemoveResult PlaylistModel::remove(std::int32_t index)
 {
+    return remove(std::vector<std::int32_t>{index});
+}
+
+PlaylistModel::RemoveResult PlaylistModel::remove(
+    const std::vector<std::int32_t>& indices)
+{
     std::lock_guard lock(mutex_);
-    if (index < 0 || index >= static_cast<std::int32_t>(entries_.size()))
+    auto selected = indices;
+    std::sort(selected.begin(), selected.end());
+    selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+    if (selected.empty() || selected.front() < 0 ||
+        selected.back() >= static_cast<std::int32_t>(entries_.size()))
         return {};
 
-    const auto removingCurrent = index == currentIndex_;
-    entries_.erase(entries_.begin() + index);
+    const auto removingCurrent = std::binary_search(
+        selected.begin(), selected.end(), currentIndex_);
+    const auto removedBeforeCurrent = std::lower_bound(
+        selected.begin(), selected.end(), currentIndex_) - selected.begin();
+    for (auto it = selected.rbegin(); it != selected.rend(); ++it)
+        entries_.erase(entries_.begin() + *it);
 
     if (entries_.empty() || removingCurrent) {
         // Removing the active item deliberately leaves no selection. It must
         // not silently switch playback to a neighboring item.
         currentIndex_ = -1;
         pendingOpenPath_.clear();
-    } else if (currentIndex_ > index) {
-        --currentIndex_;
+    } else if (currentIndex_ >= 0) {
+        currentIndex_ -= static_cast<std::int32_t>(removedBeforeCurrent);
     }
 
     return {true, removingCurrent};
@@ -82,27 +96,49 @@ PlaylistModel::RemoveResult PlaylistModel::remove(std::int32_t index)
 bool PlaylistModel::move(std::int32_t sourceIndex, std::int32_t targetIndex)
 {
     std::lock_guard lock(mutex_);
-    const auto entryCount = static_cast<std::int32_t>(entries_.size());
-    if (sourceIndex < 0 || sourceIndex >= entryCount || targetIndex < 0 ||
-        targetIndex >= entryCount)
+    if (targetIndex < 0 || targetIndex >= static_cast<std::int32_t>(entries_.size()))
         return false;
-    if (sourceIndex == targetIndex)
-        return true;
+    return moveLocked({sourceIndex},
+                      targetIndex > sourceIndex ? targetIndex + 1 : targetIndex);
+}
 
-    auto movedEntry = std::move(entries_[static_cast<std::size_t>(sourceIndex)]);
-    entries_.erase(entries_.begin() + sourceIndex);
-    entries_.insert(entries_.begin() + targetIndex, std::move(movedEntry));
+bool PlaylistModel::move(const std::vector<std::int32_t>& indices,
+                         std::int32_t insertionIndex)
+{
+    std::lock_guard lock(mutex_);
+    return moveLocked(indices, insertionIndex);
+}
 
-    if (currentIndex_ == sourceIndex) {
-        currentIndex_ = targetIndex;
-    } else if (sourceIndex < targetIndex && currentIndex_ > sourceIndex &&
-               currentIndex_ <= targetIndex) {
-        --currentIndex_;
-    } else if (sourceIndex > targetIndex && currentIndex_ >= targetIndex &&
-               currentIndex_ < sourceIndex) {
-        ++currentIndex_;
+bool PlaylistModel::moveLocked(const std::vector<std::int32_t>& indices,
+                               std::int32_t insertionIndex)
+{
+    const auto entryCount = static_cast<std::int32_t>(entries_.size());
+    auto selected = indices;
+    std::sort(selected.begin(), selected.end());
+    selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
+    if (selected.empty() || selected.front() < 0 || selected.back() >= entryCount ||
+        insertionIndex < 0 || insertionIndex > entryCount)
+        return false;
+    std::vector<std::int32_t> order;
+    order.reserve(entries_.size());
+    for (std::int32_t index = 0; index < entryCount; ++index) {
+        if (!std::binary_search(selected.begin(), selected.end(), index))
+            order.push_back(index);
     }
-
+    const auto beforeInsertion = std::lower_bound(
+        selected.begin(), selected.end(), insertionIndex) - selected.begin();
+    order.insert(order.begin() + insertionIndex - beforeInsertion,
+                 selected.begin(), selected.end());
+    std::vector<std::filesystem::path> reordered;
+    reordered.reserve(entries_.size());
+    auto newCurrent = -1;
+    for (const auto index : order) {
+        if (index == currentIndex_)
+            newCurrent = static_cast<std::int32_t>(reordered.size());
+        reordered.push_back(std::move(entries_[static_cast<std::size_t>(index)]));
+    }
+    entries_ = std::move(reordered);
+    currentIndex_ = newCurrent;
     return true;
 }
 

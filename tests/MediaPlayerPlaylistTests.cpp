@@ -63,5 +63,46 @@ int main()
     expect(state.pendingOpenPath.empty(),
            "restoring host state does not invent a pending open request");
 
+    const auto fourth = std::filesystem::path(L"C:/media/fourth.wav");
+    const auto fifth = std::filesystem::path(L"C:/media/fifth.wav");
+    playlist.restore({first, second, third}, 0);
+    expect(playlist.move(0, 2) && playlist.snapshot().currentIndex == 2 &&
+           playlist.snapshot().entries == std::vector<std::filesystem::path>{second, third, first},
+           "legacy single-item moves retain their target-index semantics");
+    expect(!playlist.move(0, 3), "single-item moves reject an invalid target index");
+    playlist.restore({first, second, third, fourth, fifth}, 2);
+    expect(playlist.move(std::vector<std::int32_t>{1, 2}, 5),
+           "a selected group can move to the end");
+    state = playlist.snapshot();
+    expect(state.entries == std::vector<std::filesystem::path>{first, fourth, fifth, second, third} &&
+           state.currentIndex == 4, "group order and playing track survive a downward move");
+    expect(playlist.move(std::vector<std::int32_t>{3, 4}, 0),
+           "a selected group can move to the beginning");
+    state = playlist.snapshot();
+    expect(state.entries == std::vector<std::filesystem::path>{second, third, first, fourth, fifth} &&
+           state.currentIndex == 1, "group order and playing track survive an upward move");
+    playlist.restore({first, second, third, fourth, fifth}, 3);
+    expect(playlist.move(std::vector<std::int32_t>{0, 2}, 4),
+           "noncontiguous selected rows can move together");
+    state = playlist.snapshot();
+    expect(state.entries == std::vector<std::filesystem::path>{second, fourth, first, third, fifth} &&
+           state.currentIndex == 1, "moving other rows preserves the current item");
+    const auto unchanged = state.entries;
+    expect(!playlist.move(std::vector<std::int32_t>{0, 99}, 0) &&
+           playlist.snapshot().entries == unchanged, "invalid batch move is atomic");
+    playlist.restore({first, second, third, fourth, fifth}, 4);
+    const auto batchRemoved = playlist.remove(std::vector<std::int32_t>{1, 3, 1});
+    state = playlist.snapshot();
+    expect(batchRemoved.removed && !batchRemoved.removedCurrent &&
+           state.entries == std::vector<std::filesystem::path>{first, third, fifth} &&
+           state.currentIndex == 2, "batch deletion handles duplicates without deleting extra rows");
+    const auto activeRemoved = playlist.remove(std::vector<std::int32_t>{0, 2});
+    expect(activeRemoved.removedCurrent && playlist.snapshot().currentIndex == -1 &&
+           playlist.snapshot().entries == std::vector<std::filesystem::path>{third},
+           "deleting a group containing the playing track clears that track");
+    expect(!playlist.remove(std::vector<std::int32_t>{0, 5}).removed &&
+           playlist.snapshot().entries.size() == 1, "invalid batch delete is atomic");
+    expect(playlist.remove(std::vector<std::int32_t>{0}).removed &&
+           playlist.snapshot().entries.empty(), "all selected entries can be removed");
     return failures == 0 ? 0 : 1;
 }

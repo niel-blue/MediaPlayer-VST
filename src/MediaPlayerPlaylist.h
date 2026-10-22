@@ -33,8 +33,11 @@ public:
     [[nodiscard]] std::optional<std::filesystem::path> advanceFrom(
         std::int32_t expectedCurrentIndex);
     [[nodiscard]] RemoveResult remove(std::int32_t index);
+    [[nodiscard]] RemoveResult remove(const std::vector<std::int32_t>& indices);
     [[nodiscard]] bool move(std::int32_t sourceIndex,
                            std::int32_t targetIndex);
+    [[nodiscard]] bool move(const std::vector<std::int32_t>& indices,
+                           std::int32_t insertionIndex);
 
     void restore(std::vector<std::filesystem::path> entries,
                  std::int32_t currentIndex);
@@ -42,6 +45,8 @@ public:
     void clearPendingOpen();
 
 private:
+    bool moveLocked(const std::vector<std::int32_t>& indices,
+                    std::int32_t insertionIndex);
     mutable std::mutex mutex_;
     std::vector<std::filesystem::path> entries_;
     std::int32_t currentIndex_ {-1};

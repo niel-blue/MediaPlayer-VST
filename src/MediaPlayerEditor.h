@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MediaPlayerMessages.h"
+#include "ui/MediaPlayerEditorStyle.h"
 #include "public.sdk/source/vst/vsteditcontroller.h"
 
 #include <cstdint>
@@ -19,6 +20,8 @@ class NativeEditor final : public Steinberg::Vst::EditorView {
 public:
     NativeEditor(Controller* controller, Steinberg::ViewRect* size);
     ~NativeEditor() override;
+    void setLightTheme(bool light, bool notifyHost = true);
+    bool isLightTheme() const noexcept { return colors_.light; }
 
     Steinberg::tresult PLUGIN_API isPlatformTypeSupported(
         Steinberg::FIDString type) SMTG_OVERRIDE;
@@ -75,8 +78,6 @@ protected:
     void removedFromParent() SMTG_OVERRIDE;
 
 private:
-    static constexpr int kDefaultPlaylistHeight = 60;
-
     enum ControlId {
         kOpenButton = 1001,
         kPlayButton = 1002,
@@ -88,6 +89,7 @@ private:
         kPlaylistList = 1009,
         kPlaylistToggleButton = 1010,
         kNextButton = 1011,
+        kThemeButton = 1012,
     };
 
     long long handleMessage(unsigned int message,
@@ -121,9 +123,12 @@ private:
     void sendSeekFromPosition(int position);
     void dragVolumeVertically(int deltaY);
     void adjustVolumeFromWheel(int delta);
-    void removePlaylistEntry(int index);
+    std::vector<std::int32_t> selectedPlaylistIndices() const;
+    void setPlaylistSelection(const std::vector<std::int32_t>& indices,
+                              int caret = -1);
+    void removeSelectedPlaylistEntries();
     int playlistInsertionIndexAt(void* rawWindow, int x, int y) const;
-    void movePlaylistEntry(int sourceIndex, int insertionIndex);
+    void moveSelectedPlaylistEntries(int insertionIndex);
     void showPlaylistContextMenu(void* rawWindow,
                                  int index,
                                  long long rawPosition);
@@ -138,6 +143,8 @@ private:
     void sendEditorLayoutState();
 
     void* window_ {nullptr};
+    EditorStyle::Theme colors_;
+    void* themeButton_ {nullptr};
     std::uintptr_t vectorDrawingToken_ {0};
     void* titleLabel_ {nullptr};
     void* statusLabel_ {nullptr};
@@ -181,6 +188,8 @@ private:
     bool playlistPointerDown_ {false};
     bool playlistDragging_ {false};
     bool ignorePlaylistMouseUp_ {false};
+    unsigned int playlistPointerModifiers_ {0};
+    std::vector<std::filesystem::path> playlistSelectionAfterEdit_;
     int playlistDragSourceIndex_ {-1};
     int playlistDragStartX_ {0};
     int playlistDragStartY_ {0};
@@ -188,10 +197,10 @@ private:
     bool playlistVisible_ {false};
     bool playlistVisibilityOverridePending_ {false};
     bool playlistVisibilityOverride_ {false};
-    int playlistHeight_ {kDefaultPlaylistHeight};
+    int playlistHeight_ {EditorLayout::kDefaultPlaylistHeight};
     bool playlistResizing_ {false};
     int playlistResizeStartY_ {0};
-    int playlistResizeStartHeight_ {kDefaultPlaylistHeight};
+    int playlistResizeStartHeight_ {EditorLayout::kDefaultPlaylistHeight};
     int laidOutWidth_ {0};
     int requestedEditorHeight_ {0};
 
